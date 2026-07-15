@@ -1,0 +1,22 @@
+{
+  "name": "@iina-jellyfin/plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@iina-jellyfin/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
+    "esbuild": "^0.27.2",
+    "iina-plugin-definition": "0.99.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}

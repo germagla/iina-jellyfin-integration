@@ -1,0 +1,38 @@
+{
+  "Items": [
+    {
+      "Name": "Example Series",
+      "ServerId": "server-1011",
+      "Id": "series-1",
+      "Type": "Series",
+      "ProductionYear": 2025,
+      "Overview": "A recorded-style fixture for the common 10.11 item subset.",
+      "UserData": {
+        "PlaybackPositionTicks": 0,
+        "Played": false
+      },
+      "ImageTags": {
+        "Primary": "primary-tag-series-1"
+      },
+      "BackdropImageTags": ["backdrop-tag-series-1"]
+    },
+    {
+      "Name": "Episode One",
+      "ServerId": "server-1011",
+      "Id": "episode-1",
+      "Type": "Episode",
+      "SeriesName": "Example Series",
+      "SeriesId": "series-1",
+      "ParentIndexNumber": 1,
+      "IndexNumber": 1,
+      "RunTimeTicks": 27000000000,
+      "UserData": {
+        "PlaybackPositionTicks": 1200000000,
+        "PlayedPercentage": 4.4,
+        "Played": false
+      }
+    }
+  ],
+  "TotalRecordCount": 2,
+  "StartIndex": 0
+}

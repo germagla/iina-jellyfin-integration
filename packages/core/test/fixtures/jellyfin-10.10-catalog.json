@@ -1,0 +1,23 @@
+{
+  "Items": [
+    {
+      "Name": "The Example",
+      "ServerId": "server-1010",
+      "Id": "movie-1",
+      "RunTimeTicks": 72000000000,
+      "ProductionYear": 2022,
+      "Type": "Movie",
+      "UserData": {
+        "PlaybackPositionTicks": 18300000000,
+        "PlayedPercentage": 25.4,
+        "Played": false
+      },
+      "ImageTags": {
+        "Primary": "primary-tag-1"
+      },
+      "BackdropImageTags": ["backdrop-tag-1"]
+    }
+  ],
+  "TotalRecordCount": 1,
+  "StartIndex": 0
+}

@@ -1,0 +1,23 @@
+{
+  "User": {
+    "Name": "viewer",
+    "ServerId": "server-1011",
+    "Id": "user-1011",
+    "HasPassword": true,
+    "HasConfiguredPassword": true,
+    "EnableAutoLogin": false,
+    "Configuration": {}
+  },
+  "SessionInfo": {
+    "Id": "session-auth-1011",
+    "UserId": "user-1011",
+    "UserName": "viewer",
+    "Client": "Jellyfin for IINA",
+    "DeviceName": "IINA",
+    "DeviceId": "device-stable-1",
+    "ApplicationVersion": "0.1.0",
+    "Capabilities": {}
+  },
+  "AccessToken": "fixture-access-token-1011",
+  "ServerId": "server-1011"
+}

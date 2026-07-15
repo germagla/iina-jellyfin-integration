@@ -1,0 +1,15 @@
+{
+  "ItemId": "movie-1",
+  "MediaSourceId": "ms-direct-local-path",
+  "PlaySessionId": "play-session-1010",
+  "PositionTicks": 50000000,
+  "CanSeek": true,
+  "IsPaused": false,
+  "IsMuted": false,
+  "IsPlaying": true,
+  "IsMediaSegmentAction": false,
+  "PlayMethod": "DirectPlay",
+  "VolumeLevel": 72,
+  "AudioStreamIndex": 1,
+  "SubtitleStreamIndex": 3
+}

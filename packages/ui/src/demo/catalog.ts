@@ -1,0 +1,187 @@
+import type { HomeCatalog, MediaCard, MediaVersionChoice, ShowDetails } from '../bridge/contracts';
+
+const movieNames = [
+  'The Quiet Orbit',
+  'Glass Harbor',
+  'Nocturne City',
+  'Atlas of Rain',
+  'Parallel North',
+  'The Last Signal',
+  'Ember District',
+  'Clouds of Europa',
+  'Stillwater',
+  'Aperture',
+  'Midnight Current',
+  'The Cartographer',
+  'Windward',
+  'Saturn House',
+  'After the White Sky',
+  'Borrowed Light',
+  'Frequency',
+  'North by Morning',
+  'Undertow',
+  'Marble Sea',
+  'The Long Return',
+  'Grey Matter',
+  'Second Horizon',
+  'Signal Fire',
+];
+
+const showNames = [
+  'Horizons',
+  'Terminal Coast',
+  'The Clearing',
+  'Dead Reckoning',
+  'Helios Station',
+  'Northline',
+  'The Archive',
+  'Black Current',
+  'Other Worlds',
+  'Moonwake',
+  'High Latitude',
+  'The Crossing',
+  'Cold Harbor',
+  'Signal Lost',
+  'Mirage',
+  'Night Shift',
+  'Beyond the Map',
+  'Last Contact',
+  'Asteria',
+  'Outer Range',
+  'The Far Shore',
+  'Caldera',
+];
+
+export const demoMovies: MediaCard[] = movieNames.map((title, index) => ({
+  id: `movie-${index + 1}`,
+  title,
+  subtitle: index % 3 === 0 ? 'Recently added' : undefined,
+  year: 2001 + (index % 24),
+  runtimeMinutes: 92 + (index % 37),
+  progress: index % 5 === 0 ? 0.34 + (index % 4) / 10 : undefined,
+  kind: 'movie',
+}));
+
+export const demoShows: MediaCard[] = showNames.map((title, index) => ({
+  id: index === 0 ? 'horizons' : `series-${index + 1}`,
+  title,
+  subtitle: index === 0 ? 'S1 · E3 · Crossing Lines' : `${1 + (index % 4)} seasons`,
+  year: 2010 + (index % 15),
+  unwatchedCount: index % 4 === 0 ? index + 1 : undefined,
+  kind: 'series',
+}));
+
+const demoVersions: MediaVersionChoice[] = [
+  {
+    id: 'source-1080',
+    label: '1080p H.264',
+    audioTracks: [
+      { id: '1', label: 'English (Atmos)' },
+      { id: '2', label: 'Spanish (5.1)' },
+    ],
+    subtitleTracks: [
+      { id: '-1', label: 'Off' },
+      { id: '3', label: 'English (SDH)' },
+      { id: '4', label: 'Spanish' },
+    ],
+    defaultAudioTrackId: '1',
+    defaultSubtitleTrackId: '3',
+  },
+  {
+    id: 'source-4k',
+    label: '4K HEVC HDR',
+    audioTracks: [
+      { id: '6', label: 'English (TrueHD)' },
+      { id: '7', label: 'English commentary' },
+    ],
+    subtitleTracks: [
+      { id: '-1', label: 'Off' },
+      { id: '8', label: 'English (PGS)' },
+    ],
+    defaultAudioTrackId: '6',
+    defaultSubtitleTrackId: '-1',
+  },
+];
+
+export const demoShowDetails: ShowDetails = {
+  id: 'horizons-episode-3',
+  title: 'HORIZONS',
+  episodeTitle: 'Crossing Lines',
+  episodeLabel: 'S1 · E3',
+  overview:
+    'When a space weather event cripples global communications, the crew must brave a solar storm to restore a critical relay satellite—but an unexpected signal changes their mission forever.',
+  year: 2024,
+  runtimeMinutes: 44,
+  officialRating: 'TV-14',
+  communityRating: 8.4,
+  progress: 0.55,
+  playbackPositionTicks: 14_520_000_000,
+  progressLabel: '20 min remaining',
+  seasonProgressLabel: '2 of 10 episodes',
+  heroArtwork: '../../demo/horizons-hero.png',
+  seasons: [{ id: 'season-index:1', label: 'Season 1', indexNumber: 1 }],
+  versions: demoVersions,
+  episodes: [
+    {
+      id: 'horizons-episode-1',
+      episodeNumber: 1,
+      seasonNumber: 1,
+      title: 'Contact',
+      durationLabel: '43 min',
+      runtimeMinutes: 43,
+      kind: 'episode',
+      artwork: '../../demo/episode-contact.png',
+      versions: demoVersions,
+    },
+    {
+      id: 'horizons-episode-2',
+      episodeNumber: 2,
+      seasonNumber: 1,
+      title: 'Afterglow',
+      durationLabel: '42 min',
+      runtimeMinutes: 42,
+      kind: 'episode',
+      artwork: '../../demo/episode-afterglow.png',
+      versions: demoVersions,
+    },
+    {
+      id: 'horizons-episode-3',
+      episodeNumber: 3,
+      seasonNumber: 1,
+      title: 'Crossing Lines',
+      durationLabel: '44 min',
+      runtimeMinutes: 44,
+      progress: 0.55,
+      playbackPositionTicks: 14_520_000_000,
+      selected: true,
+      kind: 'episode',
+      artwork: '../../demo/episode-crossing-lines.png',
+      versions: demoVersions,
+    },
+    {
+      id: 'horizons-episode-4',
+      episodeNumber: 4,
+      seasonNumber: 1,
+      title: 'Echoes',
+      durationLabel: '41 min',
+      runtimeMinutes: 41,
+      kind: 'episode',
+      artwork: '../../demo/episode-echoes.png',
+      versions: demoVersions,
+    },
+  ],
+};
+
+export const demoHome: HomeCatalog = {
+  continueWatching: [
+    { ...demoShowDetails.episodes[2], subtitle: 'Horizons · S1 E3' },
+    { ...demoMovies[5], progress: 0.64 },
+    { ...demoShows[4], subtitle: 'S2 · E6 · Blackout', progress: 0.18 },
+  ],
+  nextUp: [
+    { ...demoShowDetails.episodes[3], subtitle: 'Horizons · S1 E4' },
+    { ...demoShows[6], subtitle: 'S3 · E1 · Recovered' },
+    { ...demoShows[11], subtitle: 'S1 · E8 · Landfall' },
+  ],
+  recentlyAdded: [...demoMovies.slice(0, 6)],
+};

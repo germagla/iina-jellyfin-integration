@@ -1,0 +1,56 @@
+{
+  "MediaSources": [
+    {
+      "Protocol": "Http",
+      "Id": "ms-remux-1011",
+      "Path": "https://origin.invalid/media.mkv",
+      "Container": "mkv",
+      "Name": "4K Remux",
+      "RunTimeTicks": 81000000000,
+      "SupportsTranscoding": true,
+      "SupportsDirectStream": true,
+      "SupportsDirectPlay": false,
+      "TranscodingUrl": "/Videos/movie-2/stream?Static=false&MediaSourceId=ms-remux-1011&VideoCodec=copy&AudioCodec=copy&TranscodeReasons=ContainerNotSupported&api_key=fixture-remux-key",
+      "RequiredHttpHeaders": {},
+      "DefaultAudioStreamIndex": 1,
+      "DefaultSubtitleStreamIndex": -1,
+      "MediaStreams": [
+        { "Codec": "hevc", "Type": "Video", "Index": 0 },
+        { "Codec": "truehd", "Type": "Audio", "Index": 1 }
+      ]
+    },
+    {
+      "Protocol": "File",
+      "Id": "ms-audio-convert-1011",
+      "Path": "/srv/movie-2.mkv",
+      "Container": "mkv",
+      "Name": "Audio conversion",
+      "RunTimeTicks": 81000000000,
+      "SupportsTranscoding": true,
+      "SupportsDirectStream": false,
+      "SupportsDirectPlay": false,
+      "TranscodingUrl": "/videos/movie-2/master.m3u8?MediaSourceId=ms-audio-convert-1011&VideoCodec=copy&AudioCodec=aac&TranscodeReasons=AudioCodecNotSupported&api_key=fixture-audio-key",
+      "MediaStreams": [
+        { "Codec": "hevc", "Type": "Video", "Index": 0 },
+        { "Codec": "truehd", "Type": "Audio", "Index": 1 }
+      ]
+    },
+    {
+      "Protocol": "File",
+      "Id": "ms-video-transcode-1011",
+      "Path": "/srv/movie-2.mkv",
+      "Container": "mkv",
+      "Name": "Video conversion",
+      "RunTimeTicks": 81000000000,
+      "SupportsTranscoding": true,
+      "SupportsDirectStream": false,
+      "SupportsDirectPlay": false,
+      "TranscodingUrl": "/videos/movie-2/master.m3u8?MediaSourceId=ms-video-transcode-1011&VideoCodec=h264&AudioCodec=aac&TranscodeReasons=VideoCodecNotSupported%2CAudioCodecNotSupported&api_key=fixture-video-key",
+      "MediaStreams": [
+        { "Codec": "av1", "Type": "Video", "Index": 0 },
+        { "Codec": "truehd", "Type": "Audio", "Index": 1 }
+      ]
+    }
+  ],
+  "PlaySessionId": "play-session-1011"
+}

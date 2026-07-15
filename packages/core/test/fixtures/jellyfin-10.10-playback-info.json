@@ -1,0 +1,52 @@
+{
+  "MediaSources": [
+    {
+      "Protocol": "File",
+      "Id": "ms-direct-local-path",
+      "Path": "/srv/media/Movies/The Example/The Example.mkv",
+      "Type": "Default",
+      "Container": "mkv",
+      "Size": 14000000000,
+      "Name": "The Example - 1080p",
+      "RunTimeTicks": 72000000000,
+      "SupportsTranscoding": true,
+      "SupportsDirectStream": true,
+      "SupportsDirectPlay": true,
+      "IsRemote": false,
+      "RequiredHttpHeaders": {
+        "User-Agent": "IINA"
+      },
+      "DefaultAudioStreamIndex": 1,
+      "DefaultSubtitleStreamIndex": 3,
+      "MediaStreams": [
+        {
+          "Codec": "h264",
+          "Type": "Video",
+          "Index": 0,
+          "IsDefault": true
+        },
+        {
+          "Codec": "aac",
+          "Language": "eng",
+          "DisplayTitle": "English - AAC - Stereo",
+          "Type": "Audio",
+          "Index": 1,
+          "IsDefault": true
+        },
+        {
+          "Codec": "srt",
+          "Language": "eng",
+          "DisplayTitle": "English - SRT",
+          "Type": "Subtitle",
+          "Index": 3,
+          "IsExternal": true,
+          "DeliveryUrl": "/Videos/movie-1/ms-direct-local-path/Subtitles/3/0/Stream.srt?api_key=fixture-subtitle-key"
+        }
+      ],
+      "TranscodingUrl": "/videos/movie-1/master.m3u8?MediaSourceId=ms-direct-local-path&VideoCodec=h264&AudioCodec=aac&api_key=fixture-transcode-key",
+      "TranscodingSubProtocol": "hls",
+      "TranscodingContainer": "ts"
+    }
+  ],
+  "PlaySessionId": "play-session-1010"
+}

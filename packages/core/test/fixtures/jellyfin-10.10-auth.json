@@ -1,0 +1,26 @@
+{
+  "User": {
+    "Name": "viewer",
+    "ServerId": "server-1010",
+    "Id": "user-1010",
+    "HasPassword": true,
+    "HasConfiguredPassword": true,
+    "Configuration": {}
+  },
+  "SessionInfo": {
+    "PlayState": {},
+    "AdditionalUsers": [],
+    "Capabilities": {},
+    "RemoteEndPoint": "192.168.1.20",
+    "PlayableMediaTypes": ["Audio", "Video"],
+    "Id": "session-auth-1010",
+    "UserId": "user-1010",
+    "UserName": "viewer",
+    "Client": "Jellyfin for IINA",
+    "DeviceName": "IINA",
+    "DeviceId": "device-stable-1",
+    "ApplicationVersion": "0.1.0"
+  },
+  "AccessToken": "fixture-access-token-1010",
+  "ServerId": "server-1010"
+}
