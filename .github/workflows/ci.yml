@@ -23,7 +23,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - name: Verify committed production bundle
-        run: git diff --exit-code -- dist
+        run: |
+          git diff --exit-code -- dist
+          test -z "$(git ls-files --others --exclude-standard -- dist)"
       - run: pnpm package:archive
       - name: Verify install archive
         run: unzip -t .artifacts/jellyfin-for-iina.iinaplgz

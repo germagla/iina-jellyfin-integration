@@ -1,12 +1,18 @@
 import { z } from 'zod';
+import { hasSecretQueryParameter, isAbsoluteHttpUrl } from './portable-url';
 
 const safeTicks = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const identifier = z.string().trim().min(1).max(256);
+const absoluteHttpUrl = z.string().refine(isAbsoluteHttpUrl, { message: 'Invalid URL' });
+const credentialSafeAbsoluteHttpUrl = absoluteHttpUrl.refine(
+  (url) => !hasSecretQueryParameter(url),
+  { message: 'URL query parameters must not contain credentials' },
+);
 
 export const ConnectionMetadataSchema = z
   .object({
     schemaVersion: z.literal(1),
-    serverUrl: z.string().url(),
+    serverUrl: absoluteHttpUrl,
     serverId: identifier,
     serverName: z.string().trim().min(1).max(256),
     userId: identifier,
@@ -41,7 +47,7 @@ export const CatalogRequestSchema = z.discriminatedUnion('kind', [
   PageSchema.extend({
     kind: z.literal('library'),
     itemType: z.enum(['Movie', 'Series']),
-    parentId: identifier.optional(),
+    parentId: identifier,
     sortBy: z
       .enum(['SortName', 'DateCreated', 'PremiereDate', 'CommunityRating'])
       .default('SortName'),
@@ -96,7 +102,7 @@ export const PlaybackRequestSchema = z
     subtitleStreamIndex: z.number().int().min(-1).max(10_000).optional(),
     maxStreamingBitrate: z.number().int().min(1_000_000).max(1_000_000_000).default(120_000_000),
     openInNewWindow: z.boolean().default(false),
-    videoTranscodeApproved: z.boolean().default(false),
+    videoTranscodeConfirmationId: identifier.optional(),
   })
   .strict();
 
@@ -110,7 +116,7 @@ export const PlaybackPlanSchema = z
     itemId: identifier,
     playSessionId: identifier,
     mediaSourceId: identifier,
-    url: z.string().url(),
+    url: credentialSafeAbsoluteHttpUrl,
     headers: z.record(z.string()),
     playMethod: PlayMethodSchema,
     conversion: z.enum(['none', 'container', 'audio', 'video']),
@@ -122,7 +128,7 @@ export const PlaybackPlanSchema = z
     externalSubtitle: z
       .object({
         index: z.number().int().nonnegative(),
-        deliveryUrl: z.string().url(),
+        deliveryUrl: credentialSafeAbsoluteHttpUrl,
         codec: z.string().optional(),
         language: z.string().optional(),
         displayTitle: z.string().optional(),

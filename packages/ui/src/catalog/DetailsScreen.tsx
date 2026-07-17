@@ -11,33 +11,37 @@ import {
   Warning,
   X,
 } from '@phosphor-icons/react';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   BridgePayload,
   CatalogBridge,
   EpisodeDetails,
   MediaVersionChoice,
-  PlaybackConfirmationNotice,
   ShowDetails,
+  SupportedLibrary,
   TrackChoice,
 } from '../bridge/contracts';
 import { ProgressBar } from '../components/ProgressBar';
 import { showDetailsFromResult } from '../bridge/adapters';
 import { BrokeredArtwork } from './Artwork';
-import { AppChrome, type CatalogRoute } from './Chrome';
+import { AppChrome, type CatalogReturnRoute, type CatalogRoute } from './Chrome';
 
 interface DetailsScreenProps {
   bridge: CatalogBridge;
   show: ShowDetails;
-  playbackConfirmation?: PlaybackConfirmationNotice;
-  onConfirmationPresented: () => void;
+  libraries: SupportedLibrary[];
+  selectedLibraryId?: string;
+  activeRoute: CatalogReturnRoute;
   onNavigate: (route: CatalogRoute) => void;
+  onSelectLibrary: (libraryId: string) => void;
+  onBack: () => void;
   onDisconnect: () => void;
 }
 
 interface ConfirmationState {
   reason: string;
   payload: BridgePayload<'playback.start'>;
+  confirmationId: string;
 }
 
 interface PlaybackSelection {
@@ -60,6 +64,8 @@ function detailsForEpisode(show: ShowDetails, episode: EpisodeDetails | undefine
   return {
     ...show,
     id: episode.id,
+    kind: 'episode',
+    playable: true,
     episodeTitle: episode.title,
     episodeLabel: episodeLabel(episode),
     runtimeMinutes,
@@ -102,12 +108,14 @@ function ChoiceRow({
   label,
   value,
   choices,
+  disabled = false,
   onChange,
 }: {
   icon: ReactNode;
   label: string;
   value: string;
   choices: TrackChoice[];
+  disabled?: boolean;
   onChange: (value: string) => void;
 }) {
   return (
@@ -116,7 +124,12 @@ function ChoiceRow({
         {icon}
         {label}
       </span>
-      <select value={value} onChange={(event) => onChange(event.target.value)} aria-label={label}>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        aria-label={label}
+      >
         {choices.map((choice) => (
           <option value={choice.id} key={choice.id}>
             {choice.label}
@@ -130,20 +143,25 @@ function ChoiceRow({
 export function DetailsScreen({
   bridge,
   show,
-  playbackConfirmation,
-  onConfirmationPresented,
+  libraries,
+  selectedLibraryId,
+  activeRoute,
   onNavigate,
+  onSelectLibrary,
+  onBack,
   onDisconnect,
 }: DetailsScreenProps) {
+  const matchingEpisode = show.episodes.find((episode) => episode.id === show.id);
   const initialEpisode =
-    show.episodes.find((episode) => episode.id === show.id) ??
-    show.episodes.find((episode) => episode.selected) ??
-    show.episodes[0];
+    matchingEpisode ??
+    (show.kind === 'series'
+      ? (show.episodes.find((episode) => episode.selected) ?? show.episodes[0])
+      : undefined);
   const initialDetails = detailsForEpisode(show, initialEpisode);
   const [details, setDetails] = useState(initialDetails);
   const [selection, setSelection] = useState(() => selectionForVersions(initialDetails.versions));
   const [seasonId, setSeasonId] = useState(() => seasonIdForEpisode(show, initialEpisode));
-  const [selectedEpisodeId, setSelectedEpisodeId] = useState(initialEpisode?.id ?? show.id);
+  const [selectedEpisodeId, setSelectedEpisodeId] = useState(initialEpisode?.id ?? '');
   const [episodeLoadingId, setEpisodeLoadingId] = useState<string>();
   const episodeRequestGeneration = useRef(0);
   const [confirmation, setConfirmation] = useState<ConfirmationState>();
@@ -151,35 +169,6 @@ export function DetailsScreen({
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
 
-  useEffect(() => {
-    if (!playbackConfirmation) return;
-    const { itemId, openInNewWindow, plan } = playbackConfirmation;
-    setNotice(undefined);
-    setError(undefined);
-    setConfirmation({
-      reason: plan.transcodeReasons.length
-        ? plan.transcodeReasons.join(', ')
-        : 'Jellyfin needs to convert the video before it can play.',
-      payload: {
-        itemId,
-        startPositionTicks: 0,
-        maxStreamingBitrate: 120_000_000,
-        openInNewWindow,
-        videoTranscodeApproved: false,
-        mediaSourceId: plan.mediaSourceId,
-        ...(plan.audioStreamIndex === undefined ? {} : { audioStreamIndex: plan.audioStreamIndex }),
-        ...(plan.subtitleStreamIndex === undefined
-          ? {}
-          : { subtitleStreamIndex: plan.subtitleStreamIndex }),
-      },
-    });
-    onConfirmationPresented();
-  }, [onConfirmationPresented, playbackConfirmation]);
-
-  const selectedEpisode = useMemo(
-    () => show.episodes.find((episode) => episode.id === selectedEpisodeId),
-    [selectedEpisodeId, show.episodes],
-  );
   const visibleEpisodes = useMemo(() => {
     const season = show.seasons.find((candidate) => candidate.id === seasonId);
     if (!season) return show.episodes;
@@ -187,20 +176,22 @@ export function DetailsScreen({
   }, [seasonId, show.episodes, show.seasons]);
   const selectedVersion =
     details.versions.find((version) => version.id === selection.versionId) ?? details.versions[0];
+  const isPlayable = details.playable && (details.kind === 'movie' || details.kind === 'episode');
+  const isResumable = isPlayable && details.playbackPositionTicks > 0;
+  const playableLabel = details.kind === 'movie' ? 'Movie' : 'Episode';
 
   function playbackPayload(
     startPositionTicks: number,
     openInNewWindow: boolean,
-    videoTranscodeApproved: boolean,
   ): BridgePayload<'playback.start'> {
+    if (!isPlayable) throw new Error('This item is not available for playback.');
     const audioIndex = Number(selection.audioTrackId);
     const subtitleIndex = Number(selection.subtitleTrackId);
     return {
-      itemId: selectedEpisode?.id ?? details.id,
+      itemId: details.id,
       startPositionTicks,
       maxStreamingBitrate: 120_000_000,
       openInNewWindow,
-      videoTranscodeApproved,
       ...(selection.versionId ? { mediaSourceId: selection.versionId } : {}),
       ...(selection.audioTrackId && Number.isInteger(audioIndex)
         ? { audioStreamIndex: audioIndex }
@@ -220,7 +211,7 @@ export function DetailsScreen({
     setNotice(undefined);
     const startPositionTicks = startMode === 'resume' ? details.playbackPositionTicks : 0;
     try {
-      const payload = playbackPayload(startPositionTicks, newWindow, false);
+      const payload = playbackPayload(startPositionTicks, newWindow);
       const result = await bridge.request('playback.start', payload);
       if (result.status === 'confirmation-required') {
         setConfirmation({
@@ -228,6 +219,7 @@ export function DetailsScreen({
             ? result.plan.transcodeReasons.join(', ')
             : 'Jellyfin needs to convert the video before it can play.',
           payload,
+          confirmationId: result.confirmationId,
         });
       } else {
         setNotice(newWindow ? 'Opening in a new IINA window…' : 'Starting playback in IINA…');
@@ -297,10 +289,21 @@ export function DetailsScreen({
     setBusy(true);
     setError(undefined);
     try {
-      await bridge.request('playback.start', {
+      const result = await bridge.request('playback.start', {
         ...confirmation.payload,
-        videoTranscodeApproved: true,
+        videoTranscodeConfirmationId: confirmation.confirmationId,
       });
+      if (result.status === 'confirmation-required') {
+        setConfirmation({
+          reason: result.plan.transcodeReasons.length
+            ? result.plan.transcodeReasons.join(', ')
+            : 'Jellyfin needs to convert the video before it can play.',
+          payload: confirmation.payload,
+          confirmationId: result.confirmationId,
+        });
+        setError('The playback plan changed or the approval expired. Review it and confirm again.');
+        return;
+      }
       const newWindow = confirmation.payload.openInNewWindow;
       setConfirmation(undefined);
       setNotice(
@@ -329,9 +332,18 @@ export function DetailsScreen({
         className="details-screen__hero"
       />
       <div className="details-screen__wash" aria-hidden="true" />
-      <AppChrome route="details" onNavigate={onNavigate} onDisconnect={onDisconnect} translucent />
+      <AppChrome
+        route="details"
+        libraries={libraries}
+        selectedLibraryId={selectedLibraryId}
+        activeRoute={activeRoute}
+        onNavigate={onNavigate}
+        onSelectLibrary={onSelectLibrary}
+        onDisconnect={onDisconnect}
+        translucent
+      />
 
-      <button className="back-button" type="button" onClick={() => onNavigate('shows')}>
+      <button className="back-button" type="button" onClick={onBack}>
         <ArrowLeft size={19} aria-hidden="true" />
         Back
       </button>
@@ -342,10 +354,12 @@ export function DetailsScreen({
         </p>
         <h1 id="details-title">{details.title}</h1>
         <p className="episode-heading">
-          {details.episodeLabel} · {details.episodeTitle}
+          {details.kind === 'series'
+            ? 'Series'
+            : `${details.episodeLabel} · ${details.episodeTitle}`}
         </p>
-        <div className="metadata-row" aria-label="Episode metadata">
-          <span>{details.runtimeMinutes} min</span>
+        <div className="metadata-row" aria-label="Media metadata">
+          {details.runtimeMinutes > 0 ? <span>{details.runtimeMinutes} min</span> : null}
           <span className="rating-badge">{details.officialRating}</span>
           <span>{details.year}</span>
           <span className="star-rating">
@@ -355,82 +369,103 @@ export function DetailsScreen({
         </div>
         <p className="details-overview">{details.overview}</p>
 
-        <div className="season-progress">
-          <span>
-            <span>Progress</span>
-            <span>{details.seasonProgressLabel}</span>
-          </span>
-          <ProgressBar
-            className="progress-track"
-            label={`${Math.round(Math.min(1, Math.max(0, details.progress)) * 100)} percent watched`}
-            value={details.progress}
-          />
-        </div>
+        {isPlayable ? (
+          <>
+            {isResumable ? (
+              <div className="season-progress">
+                <span>
+                  <span>Progress</span>
+                  <span>{details.seasonProgressLabel}</span>
+                </span>
+                <ProgressBar
+                  className="progress-track"
+                  label={`${Math.round(Math.min(1, Math.max(0, details.progress)) * 100)} percent watched`}
+                  value={details.progress}
+                />
+              </div>
+            ) : null}
 
-        <div className="playback-actions">
-          <button
-            className="primary-button play-button"
-            type="button"
-            disabled={busy}
-            onClick={() => void requestPlayback('resume')}
-          >
-            {busy ? (
-              <SpinnerGap className="spin" size={22} aria-hidden="true" />
-            ) : (
-              <Play size={22} weight="fill" aria-hidden="true" />
-            )}
-            <span>
-              <strong>Resume Episode</strong>
-              <small>{details.progressLabel}</small>
-            </span>
-          </button>
-          <button
-            className="secondary-button play-button"
-            type="button"
-            disabled={busy}
-            onClick={() => void requestPlayback('beginning')}
-          >
-            <Play size={21} weight="fill" aria-hidden="true" />
-            <span>
-              <strong>Play from Beginning</strong>
-            </span>
-          </button>
-          <button
-            className="tertiary-button"
-            type="button"
-            disabled={busy}
-            onClick={() => void requestPlayback('resume', true)}
-          >
-            <ArrowSquareOut size={18} aria-hidden="true" />
-            Open in New Window
-          </button>
-        </div>
+            <div className="playback-actions">
+              <button
+                className="primary-button play-button"
+                type="button"
+                disabled={busy}
+                onClick={() => void requestPlayback(isResumable ? 'resume' : 'beginning')}
+              >
+                {busy ? (
+                  <SpinnerGap className="spin" size={22} aria-hidden="true" />
+                ) : (
+                  <Play size={22} weight="fill" aria-hidden="true" />
+                )}
+                <span>
+                  <strong>
+                    {isResumable ? `Resume ${playableLabel}` : `Play ${playableLabel}`}
+                  </strong>
+                  {isResumable ? <small>{details.progressLabel}</small> : null}
+                </span>
+              </button>
+              {isResumable ? (
+                <button
+                  className="secondary-button play-button"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void requestPlayback('beginning')}
+                >
+                  <Play size={21} weight="fill" aria-hidden="true" />
+                  <span>
+                    <strong>Play from Beginning</strong>
+                  </span>
+                </button>
+              ) : null}
+              <button
+                className="tertiary-button"
+                type="button"
+                disabled={busy}
+                onClick={() => void requestPlayback(isResumable ? 'resume' : 'beginning', true)}
+              >
+                <ArrowSquareOut size={18} aria-hidden="true" />
+                Open in New Window
+              </button>
+            </div>
 
-        <div className="track-choices">
-          <ChoiceRow
-            icon={<Cube size={20} aria-hidden="true" />}
-            label="Version"
-            value={selection.versionId}
-            choices={details.versions}
-            onChange={selectVersion}
-          />
-          <ChoiceRow
-            icon={<SpeakerHigh size={20} aria-hidden="true" />}
-            label="Audio"
-            value={selection.audioTrackId}
-            choices={selectedVersion?.audioTracks ?? []}
-            onChange={(audioTrackId) => setSelection((current) => ({ ...current, audioTrackId }))}
-          />
-          <ChoiceRow
-            icon={<Subtitles size={20} aria-hidden="true" />}
-            label="Subtitles"
-            value={selection.subtitleTrackId}
-            choices={selectedVersion?.subtitleTracks ?? []}
-            onChange={(subtitleTrackId) =>
-              setSelection((current) => ({ ...current, subtitleTrackId }))
-            }
-          />
-        </div>
+            <div className="track-choices">
+              <ChoiceRow
+                icon={<Cube size={20} aria-hidden="true" />}
+                label="Version"
+                value={selection.versionId}
+                choices={details.versions}
+                disabled={busy}
+                onChange={selectVersion}
+              />
+              <ChoiceRow
+                icon={<SpeakerHigh size={20} aria-hidden="true" />}
+                label="Audio"
+                value={selection.audioTrackId}
+                choices={selectedVersion?.audioTracks ?? []}
+                disabled={busy}
+                onChange={(audioTrackId) =>
+                  setSelection((current) => ({ ...current, audioTrackId }))
+                }
+              />
+              <ChoiceRow
+                icon={<Subtitles size={20} aria-hidden="true" />}
+                label="Subtitles"
+                value={selection.subtitleTrackId}
+                choices={selectedVersion?.subtitleTracks ?? []}
+                disabled={busy}
+                onChange={(subtitleTrackId) =>
+                  setSelection((current) => ({ ...current, subtitleTrackId }))
+                }
+              />
+            </div>
+          </>
+        ) : (
+          <p className="playback-unavailable" role="status">
+            {details.kind === 'series'
+              ? 'No playable episodes are available in this series.'
+              : 'This item is not available for playback.'}
+          </p>
+        )}
 
         {notice ? (
           <p className="playback-notice" role="status">
@@ -446,73 +481,77 @@ export function DetailsScreen({
         ) : null}
       </section>
 
-      <section className="episode-section" aria-labelledby="season-heading">
-        <label className="season-select">
-          <span id="season-heading" className="visually-hidden">
-            Season
-          </span>
-          <select
-            value={seasonId}
-            onChange={(event) => selectSeason(event.target.value)}
-            aria-label="Season"
-          >
-            {show.seasons.map((season) => (
-              <option key={season.id} value={season.id}>
-                {season.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="episode-strip">
-          {visibleEpisodes.map((episode) => (
-            <button
-              key={episode.id}
-              type="button"
-              className={
-                episode.id === selectedEpisodeId
-                  ? 'episode-card episode-card--selected'
-                  : 'episode-card'
-              }
-              onClick={() => void selectEpisode(episode.id)}
-              aria-pressed={episode.id === selectedEpisodeId}
-              aria-busy={episodeLoadingId === episode.id}
+      {show.episodes.length > 0 ? (
+        <section className="episode-section" aria-labelledby="season-heading">
+          <label className="season-select">
+            <span id="season-heading" className="visually-hidden">
+              Season
+            </span>
+            <select
+              value={seasonId}
+              disabled={busy}
+              onChange={(event) => selectSeason(event.target.value)}
+              aria-label="Season"
             >
-              <span className="episode-card__artwork">
-                <BrokeredArtwork
-                  bridge={bridge}
-                  itemId={episode.id}
-                  imageType={episode.imageType ?? 'Thumb'}
-                  imageTag={episode.imageTag}
-                  width={640}
-                  height={360}
-                  source={episode.artwork}
-                  alt=""
-                  className="episode-card__image"
-                />
-                {episode.id === selectedEpisodeId ? (
-                  <span className="selected-check">
-                    <Check size={15} weight="bold" aria-hidden="true" />
-                  </span>
-                ) : null}
-                {typeof episode.progress === 'number' ? (
-                  <ProgressBar
-                    className="episode-card__progress"
-                    label={`${Math.round(Math.min(1, Math.max(0, episode.progress)) * 100)} percent watched`}
-                    value={episode.progress}
+              {show.seasons.map((season) => (
+                <option key={season.id} value={season.id}>
+                  {season.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="episode-strip">
+            {visibleEpisodes.map((episode) => (
+              <button
+                key={episode.id}
+                type="button"
+                disabled={busy}
+                className={
+                  episode.id === selectedEpisodeId
+                    ? 'episode-card episode-card--selected'
+                    : 'episode-card'
+                }
+                onClick={() => void selectEpisode(episode.id)}
+                aria-pressed={episode.id === selectedEpisodeId}
+                aria-busy={episodeLoadingId === episode.id}
+              >
+                <span className="episode-card__artwork">
+                  <BrokeredArtwork
+                    bridge={bridge}
+                    itemId={episode.id}
+                    imageType={episode.imageType ?? 'Thumb'}
+                    imageTag={episode.imageTag}
+                    width={640}
+                    height={360}
+                    source={episode.artwork}
+                    alt=""
+                    className="episode-card__image"
                   />
-                ) : null}
-              </span>
-              <span className="episode-card__copy">
-                <strong>
-                  {episode.episodeNumber !== undefined ? `${episode.episodeNumber}. ` : ''}
-                  {episode.title}
-                </strong>
-                <span>{episode.durationLabel}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-      </section>
+                  {episode.id === selectedEpisodeId ? (
+                    <span className="selected-check">
+                      <Check size={15} weight="bold" aria-hidden="true" />
+                    </span>
+                  ) : null}
+                  {typeof episode.progress === 'number' ? (
+                    <ProgressBar
+                      className="episode-card__progress"
+                      label={`${Math.round(Math.min(1, Math.max(0, episode.progress)) * 100)} percent watched`}
+                      value={episode.progress}
+                    />
+                  ) : null}
+                </span>
+                <span className="episode-card__copy">
+                  <strong>
+                    {episode.episodeNumber !== undefined ? `${episode.episodeNumber}. ` : ''}
+                    {episode.title}
+                  </strong>
+                  <span>{episode.durationLabel}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {confirmation ? (
         <div className="modal-backdrop" role="presentation">

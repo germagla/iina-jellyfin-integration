@@ -1,45 +1,52 @@
 import {
   BaseItemSchema,
   BridgeRequestSchema,
-  ItemsResultSchema,
-  PlaybackRequestSchema,
+  CATALOG_DIAGNOSTIC_MESSAGE,
+  CATALOG_READY_MESSAGE,
   parseBridgeResult,
   type AuthenticatedApiContext,
-  type BridgeError,
   type BridgeOperation,
   type BridgeRequest,
   type BridgeResponse,
+  type AuthenticatedConnection,
   type ConnectionMetadata,
   type PlaybackRequest,
 } from '@iina-jellyfin/core';
 import { ArtworkCache } from './artwork-cache';
+import { toBridgeError } from './bridge-error';
+import { consumeCatalogOpenRequest } from './catalog-open-request';
 import {
   BRIDGE_REQUEST_MESSAGE,
   BRIDGE_RESPONSE_MESSAGE,
-  MANAGED_PLAYER_LABEL,
   PLAYER_MESSAGES,
-  PLUGIN_PLAYBACK_SCHEME,
   PLUGIN_VERSION,
 } from './constants';
+import {
+  createGlobalDiagnosticSink,
+  parseCatalogDiagnosticRecord,
+  PersistentDiagnosticLog,
+} from './diagnostic-log';
+import { consumeDiagnosticLogRevealRequest } from './diagnostic-log-request';
 import { createOpaqueId } from './ids';
-import { IinaHttpTransport, JellyfinHttpError } from './iina-http';
+import { IinaHttpTransport } from './iina-http';
+import { createIinaKeychainApi } from './iina-keychain';
+import { createPlayerInstanceOnMainThread, runOnIinaMainThread } from './iina-main-thread';
 import { JellyfinClient, type QuickConnectAttempt } from './jellyfin-client';
+import { assertPlayableMediaItem } from './media-playability';
 import { ConnectionStore } from './persistence';
 import {
   displayMetadataFromItem,
   publicPlaybackResult,
   type PlayerLaunch,
 } from './player-messages';
+import { PlaybackConfirmationStore } from './playback-confirmations';
 import { SafeLogger } from './safe-logger';
 
 const api = iina;
-const logger = new SafeLogger({
-  log: (message) => api.console.log(message),
-  warn: (message) => api.console.warn(message),
-  error: (message) => api.console.error(message),
-});
+const diagnosticLog = new PersistentDiagnosticLog(api.file, (message) => api.console.warn(message));
+const logger = new SafeLogger(createGlobalDiagnosticSink(api.console, diagnosticLog));
 const transport = new IinaHttpTransport(api.http);
-const connectionStore = new ConnectionStore(api.preferences, api.utils);
+const connectionStore = new ConnectionStore(api.preferences, createIinaKeychainApi(api.utils));
 const client = new JellyfinClient(transport, {
   deviceId: connectionStore.getDeviceId(),
   version: PLUGIN_VERSION,
@@ -54,7 +61,6 @@ let quickConnectAttempt: QuickConnectAttempt | undefined;
 let quickConnectGeneration = 0;
 let connectionGeneration = 0;
 let managedPlayerId: number | undefined;
-let managedPlayerReference: string | undefined;
 let managedPlaybackSequence = 0;
 interface PendingLaunch {
   launch: PlayerLaunch;
@@ -65,30 +71,25 @@ interface PendingLaunch {
   playerId?: number;
   managedSequence?: number;
 }
-interface CatalogPlaybackState {
-  generation: number;
-  started: boolean;
-  terminal: boolean;
-  itemId?: string;
-}
-interface CatalogPlaybackConfirmation {
-  itemId: string;
-  plan: ReturnType<typeof publicPlaybackResult>;
-  openInNewWindow: boolean;
-  connectionGeneration: number;
-  managedSequence?: number;
+interface PreparedLaunch {
+  launch: PlayerLaunch;
+  publicPlan: ReturnType<typeof publicPlaybackResult>;
 }
 const pendingLaunches = new Map<string, PendingLaunch>();
+const playbackConfirmations = new PlaybackConfirmationStore<PreparedLaunch>(
+  Date.now,
+  () => createOpaqueId('transcode-confirmation'),
+  120_000,
+  16,
+  setTimeout,
+);
 const createdPlayerIds = new Set<number>();
-const playerReferences = new Set<string>();
-const playerIdByReference = new Map<string, number>();
-const completedGenerations = new Set<string>();
-const catalogPlaybackStates = new Map<string, CatalogPlaybackState>();
-const catalogInvalidationKeys = new Set<string>();
-const closedGenerations = new Set<string>();
-let pendingCatalogConfirmation: CatalogPlaybackConfirmation | undefined;
+const catalogDiagnosticFingerprints = new Set<string>();
+let catalogReady = false;
+let catalogOpenRequested = false;
 const PENDING_LAUNCH_TTL_MS = 30_000;
-const DEDUPE_RETENTION_MS = 60_000;
+const MAX_CATALOG_DIAGNOSTICS_PER_ENTRY = 32;
+const SESSION_REVOCATION_GRACE_MS = 2_500;
 
 function staleRequest(): Error & { code: string } {
   const error = new Error('The connection changed before this request completed.') as Error & {
@@ -116,13 +117,6 @@ function assertManagedPlaybackSequence(sequence: number | undefined): void {
   }
 }
 
-function playerHasReference(playerId: number): boolean {
-  for (const referencedId of playerIdByReference.values()) {
-    if (referencedId === playerId) return true;
-  }
-  return false;
-}
-
 function prunePendingLaunches(): void {
   const cutoff = Date.now() - PENDING_LAUNCH_TTL_MS;
   const possiblyOrphanedPlayers = new Set<number>();
@@ -139,14 +133,20 @@ function prunePendingLaunches(): void {
     const stillPending = [...pendingLaunches.values()].some(
       (pending) => pending.playerId === playerId,
     );
-    if (stillPending || playerHasReference(playerId)) continue;
-    api.global.postMessage(playerId, PLAYER_MESSAGES.stop, { reason: 'closed' });
-    createdPlayerIds.delete(playerId);
-    if (managedPlayerId === playerId) {
-      managedPlayerId = undefined;
-      managedPlayerReference = undefined;
-    }
+    if (stillPending) continue;
+    void postPlayerMessage(playerId, PLAYER_MESSAGES.stop, { reason: 'closed' }).catch((error) => {
+      logger.warn('Could not stop an expired controlled player', error);
+    });
+    // IINA does not expose a way to destroy a controlled PlayerCore. `stop`
+    // closes its window but leaves the numeric core available for a later
+    // launch, so keep tracking it instead of creating an unreachable orphan.
   }
+}
+
+function postPlayerMessage(playerId: number, name: string, payload: unknown): Promise<void> {
+  return runOnIinaMainThread(() => {
+    api.global.postMessage(playerId, name, payload);
+  });
 }
 
 function registerPendingLaunch(nonce: string, pending: PendingLaunch): void {
@@ -156,65 +156,55 @@ function registerPendingLaunch(nonce: string, pending: PendingLaunch): void {
   }, PENDING_LAUNCH_TTL_MS + 100);
 }
 
-function discardPendingLaunchesForPlayer(playerId: number): void {
-  for (const [nonce, pending] of pendingLaunches) {
-    if (pending.playerId === playerId) pendingLaunches.delete(nonce);
-  }
-}
-
-function invalidateCatalogOnce(
-  player: string,
-  generation: number,
-  transition: 'started' | 'ended',
-  reason: string,
-  state: Record<string, unknown>,
-): void {
-  const key = `${player}:${generation}:${transition}`;
-  if (catalogInvalidationKeys.has(key)) return;
-  catalogInvalidationKeys.add(key);
-  api.standaloneWindow.postMessage('catalog.invalidated', { reason, state });
-}
-
-function releasePlayerDedupeState(player: string): void {
-  setTimeout(() => {
-    for (const key of catalogInvalidationKeys) {
-      if (key.startsWith(`${player}:`)) catalogInvalidationKeys.delete(key);
-    }
-    for (const key of completedGenerations) {
-      if (key.startsWith(`${player}:`)) completedGenerations.delete(key);
-    }
-    for (const key of closedGenerations) {
-      if (key.startsWith(`${player}:`)) closedGenerations.delete(key);
-    }
-  }, DEDUPE_RETENTION_MS);
-}
-
-function stopAndForgetPlayers(reason: 'closed' | 'replaced' | 'user'): void {
+function stopTrackedPlayers(reason: 'closed' | 'replaced' | 'user'): void {
   managedPlaybackSequence += 1;
   for (const playerId of createdPlayerIds) {
-    api.global.postMessage(playerId, PLAYER_MESSAGES.stop, { reason });
+    void postPlayerMessage(playerId, PLAYER_MESSAGES.stop, { reason }).catch((error) => {
+      logger.warn('Could not stop a controlled Jellyfin player', error);
+    });
   }
-  createdPlayerIds.clear();
-  playerReferences.clear();
-  playerIdByReference.clear();
-  catalogPlaybackStates.clear();
-  completedGenerations.clear();
-  catalogInvalidationKeys.clear();
-  closedGenerations.clear();
-  pendingCatalogConfirmation = undefined;
-  managedPlayerId = undefined;
-  managedPlayerReference = undefined;
+  playbackConfirmations.clear();
 }
 
 function beginAuthenticationAttempt(): number {
   connectionGeneration += 1;
-  connectionStore.clear();
   quickConnectAttempt = undefined;
   quickConnectGeneration = connectionGeneration;
   pendingLaunches.clear();
-  pendingCatalogConfirmation = undefined;
-  stopAndForgetPlayers('closed');
+  playbackConfirmations.clear();
+  stopTrackedPlayers('closed');
   return connectionGeneration;
+}
+
+async function acceptAuthenticatedConnection(
+  authenticated: AuthenticatedConnection,
+  validate: () => void,
+): Promise<void> {
+  let previousContext: AuthenticatedApiContext | undefined;
+  try {
+    validate();
+    previousContext = storedAuthenticatedContext();
+    connectionStore.save(authenticated.metadata, authenticated.accessToken);
+  } catch (error) {
+    if (!storedConnectionMatches(authenticated)) {
+      await revokeSession(
+        authenticatedContextFrom(authenticated),
+        'Could not revoke a Jellyfin session after authentication was rejected',
+      );
+    }
+    throw error;
+  }
+
+  if (
+    previousContext !== undefined &&
+    (previousContext.serverUrl !== authenticated.metadata.serverUrl ||
+      previousContext.accessToken !== authenticated.accessToken)
+  ) {
+    void revokeSession(
+      previousContext,
+      'Could not revoke the previous Jellyfin session after connection replacement',
+    );
+  }
 }
 
 function publicConnection(metadata: ConnectionMetadata | undefined) {
@@ -230,6 +220,50 @@ function publicConnection(metadata: ConnectionMetadata | undefined) {
   };
 }
 
+function authenticatedContextFrom(authenticated: AuthenticatedConnection): AuthenticatedApiContext {
+  return {
+    ...client.identity,
+    serverUrl: authenticated.metadata.serverUrl,
+    userId: authenticated.metadata.userId,
+    accessToken: authenticated.accessToken,
+  };
+}
+
+function storedAuthenticatedContext(): AuthenticatedApiContext | undefined {
+  const metadata = connectionStore.readMetadata();
+  if (metadata === undefined) return undefined;
+  const accessToken = connectionStore.readAccessToken(metadata);
+  if (accessToken === undefined) return undefined;
+  return {
+    serverUrl: metadata.serverUrl,
+    userId: metadata.userId,
+    accessToken,
+    deviceId: metadata.deviceId,
+    version: PLUGIN_VERSION,
+  };
+}
+
+function storedConnectionMatches(authenticated: AuthenticatedConnection): boolean {
+  try {
+    const stored = storedAuthenticatedContext();
+    return (
+      stored?.serverUrl === authenticated.metadata.serverUrl &&
+      stored.userId === authenticated.metadata.userId &&
+      stored.accessToken === authenticated.accessToken
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function revokeSession(context: AuthenticatedApiContext, warning: string): Promise<void> {
+  try {
+    await client.reportSessionEnded(context);
+  } catch (error) {
+    logger.warn(warning, error);
+  }
+}
+
 function authenticatedContext(): AuthenticatedApiContext {
   const metadata = connectionStore.readMetadata();
   if (metadata === undefined) throw new Error('Connect to Jellyfin before browsing your library.');
@@ -242,35 +276,6 @@ function authenticatedContext(): AuthenticatedApiContext {
     accessToken,
     deviceId: metadata.deviceId,
     version: PLUGIN_VERSION,
-  };
-}
-
-function bridgeError(error: unknown): BridgeError {
-  if (error instanceof JellyfinHttpError) {
-    return {
-      code: error.statusCode === 401 || error.statusCode === 403 ? 'AUTH_EXPIRED' : 'NETWORK_ERROR',
-      message: error.message,
-      recoverable: error.recoverable,
-    };
-  }
-  if (error instanceof Error) {
-    const code = 'code' in error && typeof error.code === 'string' ? error.code : 'REQUEST_FAILED';
-    return { code, message: error.message, recoverable: true };
-  }
-  if (error !== null && typeof error === 'object') {
-    const candidate = error as { code?: unknown; message?: unknown; recoverable?: unknown };
-    if (typeof candidate.code === 'string' && typeof candidate.message === 'string') {
-      return {
-        code: candidate.code,
-        message: candidate.message,
-        recoverable: candidate.recoverable !== false,
-      };
-    }
-  }
-  return {
-    code: 'REQUEST_FAILED',
-    message: 'The request could not be completed.',
-    recoverable: true,
   };
 }
 
@@ -293,7 +298,7 @@ function respondError(
     operation: request.operation,
     requestId: request.requestId,
     ok: false,
-    error: bridgeError(error),
+    error: toBridgeError(error),
   };
   api.standaloneWindow.postMessage(BRIDGE_RESPONSE_MESSAGE, response);
 }
@@ -304,28 +309,44 @@ async function prepareLaunch(request: PlaybackRequest): Promise<{
 }> {
   const generation = connectionGeneration;
   const context = authenticatedContext();
-  const [plan, details] = await Promise.all([
-    client.createPlaybackPlan(request, context),
-    client.queryCatalog({ kind: 'details', itemId: request.itemId }, context),
-  ]);
+  const details = BaseItemSchema.parse(
+    await client.queryCatalog({ kind: 'details', itemId: request.itemId }, context),
+  );
+  assertPlayableMediaItem(details);
+  assertConnectionGeneration(generation);
+  const plan = await client.createPlaybackPlan(request, context);
   assertConnectionGeneration(generation);
   const nonce = createOpaqueId('play');
   const launch: PlayerLaunch = {
     nonce,
     plan,
     context,
-    display: displayMetadataFromItem(BaseItemSchema.parse(details)),
+    display: displayMetadataFromItem(details),
   };
   return { launch, publicPlan: publicPlaybackResult(plan) };
 }
 
-async function launchPlayback(request: PlaybackRequest): Promise<unknown> {
-  pendingCatalogConfirmation = undefined;
-  const managedSequence = request.openInNewWindow ? undefined : ++managedPlaybackSequence;
-  const { launch, publicPlan } = await prepareLaunch(request);
+async function deliverPreparedLaunch(
+  request: PlaybackRequest,
+  prepared: PreparedLaunch,
+  managedSequence: number | undefined,
+): Promise<unknown> {
+  const { launch, publicPlan } = prepared;
+  const correlation = launch.diagnosticCorrelation ?? createOpaqueId('diagnostic-playback');
   assertManagedPlaybackSequence(managedSequence);
-  if (launch.plan.requiresVideoTranscodeConfirmation && !request.videoTranscodeApproved) {
-    return { status: 'confirmation-required', plan: publicPlan };
+
+  if (!request.openInNewWindow && managedPlayerId !== undefined) {
+    assertManagedPlaybackSequence(managedSequence);
+    logger.info('native-player.reuse', { correlation });
+    // The controlled main entry is already loaded. Deliver the complete trusted
+    // launch directly by numeric handle; PlayerRuntime replaces active media via
+    // mpv so IINA does not close and recreate the visible player window.
+    const playerId = managedPlayerId;
+    await runOnIinaMainThread(() => {
+      assertManagedPlaybackSequence(managedSequence);
+      api.global.postMessage(playerId, PLAYER_MESSAGES.launch, launch);
+    });
+    return { status: 'started', plan: publicPlan };
   }
 
   const nonce = launch.nonce;
@@ -340,36 +361,105 @@ async function launchPlayback(request: PlaybackRequest): Promise<unknown> {
   if (managedSequence !== undefined) pending.managedSequence = managedSequence;
   registerPendingLaunch(nonce, pending);
 
-  if (!request.openInNewWindow && managedPlayerId !== undefined) {
-    pending.playerId = managedPlayerId;
-    try {
-      api.global.postMessage(managedPlayerId, PLAYER_MESSAGES.replace, { nonce });
-    } catch (error) {
-      pendingLaunches.delete(nonce);
-      throw error;
-    }
-  } else {
-    const label = request.openInNewWindow ? `jellyfin-player-${nonce}` : MANAGED_PLAYER_LABEL;
-    let playerId: number;
-    try {
-      playerId = api.global.createPlayerInstance({
-        label,
-        url: `${PLUGIN_PLAYBACK_SCHEME}//play/${encodeURIComponent(nonce)}`,
+  let playerId: number;
+  try {
+    logger.info('native-player.create.scheduled', { correlation });
+    playerId = await createPlayerInstanceOnMainThread(() => {
+      assertConnectionGeneration(pending.generation);
+      assertManagedPlaybackSequence(managedSequence);
+      if (pendingLaunches.get(nonce) !== pending) throw stalePlaybackRequest();
+      logger.info('native-player.create.begin', { correlation });
+      return api.global.createPlayerInstance({
+        label: nonce,
         enablePlugins: false,
       });
-    } catch (error) {
-      pendingLaunches.delete(nonce);
-      throw error;
-    }
-    pending.playerId = playerId;
-    pending.createdPlayer = true;
-    createdPlayerIds.add(playerId);
-    if (!request.openInNewWindow) {
-      managedPlayerId = playerId;
-      managedPlayerReference = undefined;
-    }
+    });
+  } catch (error) {
+    if (pendingLaunches.get(nonce) === pending) pendingLaunches.delete(nonce);
+    throw error;
+  }
+  logger.info('native-player.create.returned', { correlation });
+  pending.playerId = playerId;
+  pending.createdPlayer = true;
+  createdPlayerIds.add(playerId);
+  try {
+    // A newer bridge request can start after the main-run-loop callback creates
+    // the core but before this async continuation resumes. Retain the numeric
+    // core for reuse, but never deliver the superseded launch to it.
+    assertConnectionGeneration(pending.generation);
+    assertManagedPlaybackSequence(managedSequence);
+    if (pendingLaunches.get(nonce) !== pending) throw stalePlaybackRequest();
+    // createPlayerInstance loads this plugin's main entry synchronously before
+    // returning the numeric player handle. Deliver by that handle instead of
+    // depending on IINA 1.4.4's broken child-to-Global callback context.
+    await runOnIinaMainThread(() => {
+      assertConnectionGeneration(pending.generation);
+      assertManagedPlaybackSequence(managedSequence);
+      if (pendingLaunches.get(nonce) !== pending) throw stalePlaybackRequest();
+      api.global.postMessage(playerId, PLAYER_MESSAGES.launch, pending.launch);
+      // Claim the reusable handle only in the same main-run-loop callback that
+      // successfully delivered the still-current launch. A superseded create
+      // remains tracked for cleanup/reuse but can never steal managed ownership.
+      if (!request.openInNewWindow) managedPlayerId = playerId;
+    });
+    pendingLaunches.delete(nonce);
+  } catch (error) {
+    pendingLaunches.delete(nonce);
+    throw error;
   }
   return { status: 'started', plan: publicPlan };
+}
+
+async function launchPlayback(request: PlaybackRequest): Promise<unknown> {
+  if (request.videoTranscodeConfirmationId !== undefined) {
+    const confirmed = playbackConfirmations.consume(request.videoTranscodeConfirmationId, request, {
+      connectionGeneration,
+      managedSequence: managedPlaybackSequence,
+    });
+    if (confirmed !== undefined) {
+      const correlation = confirmed.value.launch.diagnosticCorrelation;
+      logger.info('playback.confirmation.accepted', { correlation });
+      return deliverPreparedLaunch(request, confirmed.value, confirmed.managedSequence);
+    }
+  }
+
+  const correlation = createOpaqueId('diagnostic-playback');
+  logger.info('playback.prepare.begin', {
+    correlation,
+    resume: request.startPositionTicks > 0,
+    openInNewWindow: request.openInNewWindow === true,
+    requestedVersion: request.mediaSourceId !== undefined,
+    requestedAudio: request.audioStreamIndex !== undefined,
+    requestedSubtitles: request.subtitleStreamIndex !== undefined,
+    suppliedConfirmation: request.videoTranscodeConfirmationId !== undefined,
+  });
+  const managedSequence = request.openInNewWindow ? undefined : ++managedPlaybackSequence;
+  const prepared = await prepareLaunch(request);
+  prepared.launch.diagnosticCorrelation = correlation;
+  assertManagedPlaybackSequence(managedSequence);
+  logger.info('playback.plan.ready', {
+    correlation,
+    playMethod: prepared.launch.plan.playMethod,
+    conversion: prepared.launch.plan.conversion,
+    confirmationRequired: prepared.launch.plan.requiresVideoTranscodeConfirmation,
+    externalSubtitle: prepared.launch.plan.externalSubtitle !== undefined,
+    selectedAudio: prepared.launch.plan.audioStreamIndex !== undefined,
+    selectedSubtitles: prepared.launch.plan.subtitleStreamIndex !== undefined,
+  });
+  if (prepared.launch.plan.requiresVideoTranscodeConfirmation) {
+    const confirmationId = playbackConfirmations.issue(request, prepared, {
+      connectionGeneration,
+      ...(managedSequence === undefined ? {} : { managedSequence }),
+    });
+    logger.info('playback.confirmation.required', { correlation });
+    return {
+      status: 'confirmation-required',
+      plan: prepared.publicPlan,
+      confirmationId,
+    };
+  }
+
+  return deliverPreparedLaunch(request, prepared, managedSequence);
 }
 
 async function handleBridgeRequest(raw: unknown): Promise<void> {
@@ -407,8 +497,9 @@ async function handleBridgeRequest(raw: unknown): Promise<void> {
       case 'connection.login.password': {
         const generation = beginAuthenticationAttempt();
         const authenticated = await client.loginWithPassword(request.payload);
-        assertConnectionGeneration(generation);
-        connectionStore.save(authenticated.metadata, authenticated.accessToken);
+        await acceptAuthenticatedConnection(authenticated, () => {
+          assertConnectionGeneration(generation);
+        });
         respond(request, { connection: publicConnection(authenticated.metadata) });
         return;
       }
@@ -430,13 +521,16 @@ async function handleBridgeRequest(raw: unknown): Promise<void> {
         const attempt = quickConnectAttempt;
         const generation = quickConnectGeneration;
         const result = await client.pollQuickConnect(attempt);
-        assertConnectionGeneration(generation);
-        if (quickConnectAttempt !== attempt) throw staleRequest();
         if (!result.authenticated) {
+          assertConnectionGeneration(generation);
+          if (quickConnectAttempt !== attempt) throw staleRequest();
           respond(request, { authenticated: false });
           return;
         }
-        connectionStore.save(result.metadata, result.accessToken);
+        await acceptAuthenticatedConnection(result, () => {
+          assertConnectionGeneration(generation);
+          if (quickConnectAttempt !== attempt) throw staleRequest();
+        });
         quickConnectAttempt = undefined;
         respond(request, {
           authenticated: true,
@@ -444,17 +538,32 @@ async function handleBridgeRequest(raw: unknown): Promise<void> {
         });
         return;
       }
-      case 'connection.disconnect':
+      case 'connection.disconnect': {
+        let context: AuthenticatedApiContext | undefined;
+        try {
+          context = storedAuthenticatedContext();
+        } catch {
+          // Local erasure below is authoritative even if the token cannot be read for revocation.
+        }
         connectionGeneration += 1;
         connectionStore.clear();
         quickConnectAttempt = undefined;
         quickConnectGeneration = connectionGeneration;
         pendingLaunches.clear();
-        pendingCatalogConfirmation = undefined;
-        completedGenerations.clear();
-        stopAndForgetPlayers('closed');
+        playbackConfirmations.clear();
+        stopTrackedPlayers('closed');
+        if (context !== undefined) {
+          // Player cores keep their own in-memory context long enough to send
+          // their final stopped reports. IINA has no child-to-Global
+          // acknowledgement that is reliable in 1.4.4, so delay revocation by
+          // a short bounded grace period instead of invalidating those reports.
+          setTimeout(() => {
+            void revokeSession(context, 'Could not revoke the disconnected Jellyfin session');
+          }, SESSION_REVOCATION_GRACE_MS);
+        }
         respond(request, { disconnected: true });
         return;
+      }
       case 'catalog.query': {
         const generation = connectionGeneration;
         const result = await client.queryCatalog(request.payload, authenticatedContext());
@@ -476,9 +585,10 @@ async function handleBridgeRequest(raw: unknown): Promise<void> {
         return;
       case 'playback.stop':
         managedPlaybackSequence += 1;
+        playbackConfirmations.clear();
         prunePendingLaunches();
         if (managedPlayerId !== undefined) {
-          api.global.postMessage(managedPlayerId, PLAYER_MESSAGES.stop, {
+          await postPlayerMessage(managedPlayerId, PLAYER_MESSAGES.stop, {
             reason: request.payload.reason,
           });
         }
@@ -497,124 +607,28 @@ async function handleBridgeRequest(raw: unknown): Promise<void> {
   }
 }
 
-const PLAYER_STATUSES = new Set(['idle', 'preparing', 'playing', 'paused', 'stopped', 'error']);
-
-interface PublicPlayerState {
-  generation: number;
-  status: string;
-  itemId?: string;
-  stopReason?: string;
-}
-
-function parsePublicPlayerState(raw: unknown): PublicPlayerState | undefined {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  const candidate = raw as Record<string, unknown>;
-  if (
-    typeof candidate.generation !== 'number' ||
-    !Number.isInteger(candidate.generation) ||
-    candidate.generation < 0 ||
-    typeof candidate.status !== 'string' ||
-    !PLAYER_STATUSES.has(candidate.status)
-  ) {
-    return undefined;
-  }
-  const state: PublicPlayerState = {
-    generation: candidate.generation,
-    status: candidate.status,
-  };
-  if (
-    typeof candidate.itemId === 'string' &&
-    candidate.itemId.length >= 1 &&
-    candidate.itemId.length <= 512
-  ) {
-    state.itemId = candidate.itemId;
-  }
-  if (typeof candidate.stopReason === 'string' && candidate.stopReason.length <= 64) {
-    state.stopReason = candidate.stopReason;
-  }
-  return state;
-}
-
-function publicCatalogState(state: PublicPlayerState): Record<string, unknown> {
-  const result: Record<string, unknown> = {
-    generation: state.generation,
-    status: state.status,
-  };
-  if (state.itemId !== undefined) result.itemId = state.itemId;
-  if (state.stopReason !== undefined) result.stopReason = state.stopReason;
-  return result;
-}
-
-async function sendSeriesCorrectUpNext(
-  player: string,
-  generation: number,
-  completedItemId: string,
-): Promise<void> {
-  const requestConnectionGeneration = connectionGeneration;
-  const context = authenticatedContext();
-  const completedItem = BaseItemSchema.parse(
-    await client.queryCatalog({ kind: 'details', itemId: completedItemId }, context),
-  );
-  assertConnectionGeneration(requestConnectionGeneration);
-  if (completedItem.Type !== 'Episode' || completedItem.SeriesId == null) return;
-
-  const nextUp = ItemsResultSchema.parse(
-    await client.queryCatalog(
-      {
-        kind: 'home',
-        shelf: 'nextUp',
-        limit: 1,
-        seriesId: completedItem.SeriesId,
-      },
-      context,
-    ),
-  );
-  assertConnectionGeneration(requestConnectionGeneration);
-  const next = nextUp.Items.find(
-    (item) => item.SeriesId === completedItem.SeriesId && item.Id !== completedItem.Id,
-  );
-  if (next === undefined) return;
-
-  const currentState = catalogPlaybackStates.get(player);
-  const completionKey = `${player}:${generation}`;
-  if (
-    currentState?.generation !== generation ||
-    !currentState.terminal ||
-    !completedGenerations.has(completionKey) ||
-    !playerReferences.has(player)
-  ) {
-    return;
-  }
-  api.global.postMessage(player, PLAYER_MESSAGES.upNext, {
-    item: next,
-    countdownSeconds: 10,
-    autoplay: api.preferences.get('autoplayNextEpisode') !== false,
-  });
-}
-
-function openCatalog(): void {
-  api.standaloneWindow.open();
+function postCatalogVisible(): void {
   setTimeout(() => {
     api.standaloneWindow.postMessage('catalog.visible', {
       connection: publicConnection(connectionStore.readMetadata()),
     });
-    const confirmation = pendingCatalogConfirmation;
-    if (confirmation === undefined) return;
-    if (
-      confirmation.connectionGeneration !== connectionGeneration ||
-      (confirmation.managedSequence !== undefined &&
-        confirmation.managedSequence !== managedPlaybackSequence)
-    ) {
-      pendingCatalogConfirmation = undefined;
-      return;
-    }
-    api.standaloneWindow.postMessage('playback.confirmation-required', {
-      itemId: confirmation.itemId,
-      plan: confirmation.plan,
-      source: 'up-next',
-      openInNewWindow: confirmation.openInNewWindow,
-    });
   }, 50);
+}
+
+function openCatalog(): void {
+  catalogOpenRequested = true;
+  api.standaloneWindow.open();
+  if (catalogReady) postCatalogVisible();
+}
+
+function markCatalogReady(): void {
+  if (catalogReady) return;
+  catalogReady = true;
+  if (!catalogOpenRequested) return;
+  // A second open after the document mounts forces IINA 1.4.4 to paint a
+  // standalone WKWebView that was opened during its cold-load window.
+  api.standaloneWindow.open();
+  postCatalogVisible();
 }
 
 api.standaloneWindow.loadFile('dist/ui/catalog/index.html');
@@ -626,177 +640,37 @@ api.standaloneWindow.setProperty({
 });
 api.standaloneWindow.setFrame(1_200, 820, null, null);
 api.standaloneWindow.onMessage(BRIDGE_REQUEST_MESSAGE, (data) => {
+  // A first bridge request also proves the catalog mounted. This closes the
+  // narrow race where catalog.ready can be posted while loadFile is still
+  // returning and before IINA has installed this entry's message handler.
+  markCatalogReady();
   void handleBridgeRequest(data);
 });
-
-api.menu.addItem(api.menu.item('Open Jellyfin Library', openCatalog));
-
-api.global.onMessage(PLAYER_MESSAGES.planRequest, (data, player) => {
-  const record = data as { nonce?: unknown };
-  if (typeof record.nonce !== 'string' || player === undefined) return;
-  prunePendingLaunches();
-  const pending = pendingLaunches.get(record.nonce);
+api.standaloneWindow.onMessage(CATALOG_READY_MESSAGE, () => markCatalogReady());
+api.standaloneWindow.onMessage(CATALOG_DIAGNOSTIC_MESSAGE, (data) => {
+  const record = parseCatalogDiagnosticRecord(data);
+  if (record === undefined) return;
+  const fingerprint = `${record.kind}\n${record.message}\n${record.stack ?? ''}`;
   if (
-    pending === undefined ||
-    pending.generation !== connectionGeneration ||
-    (pending.managed && pending.managedSequence !== managedPlaybackSequence)
+    catalogDiagnosticFingerprints.has(fingerprint) ||
+    catalogDiagnosticFingerprints.size >= MAX_CATALOG_DIAGNOSTICS_PER_ENTRY
   ) {
-    pendingLaunches.delete(record.nonce);
     return;
   }
-  playerReferences.add(player);
-  if (pending.playerId !== undefined) playerIdByReference.set(player, pending.playerId);
-  if (pending.managed) managedPlayerReference = player;
-  api.global.postMessage(player, PLAYER_MESSAGES.plan, pending.launch);
-  pendingLaunches.delete(record.nonce);
+  catalogDiagnosticFingerprints.add(fingerprint);
+  logger.error('Catalog webview failure', record);
 });
 
-api.global.onMessage(PLAYER_MESSAGES.closed, (data, player) => {
-  if (player !== undefined) {
-    const playerId = playerIdByReference.get(player);
-    const catalogState = catalogPlaybackStates.get(player);
-    const reportedGeneration = (data as { generation?: unknown }).generation;
-    const generation =
-      typeof reportedGeneration === 'number' &&
-      Number.isInteger(reportedGeneration) &&
-      reportedGeneration >= 0
-        ? reportedGeneration
-        : catalogState?.generation;
-    if (generation !== undefined) {
-      closedGenerations.add(`${player}:${generation}`);
-      if (catalogState?.started === true && !catalogState.terminal) {
-        invalidateCatalogOnce(player, generation, 'ended', 'player-closed', {
-          generation,
-          status: 'stopped',
-          stopReason: 'closed',
-        });
-      }
-    }
-    catalogPlaybackStates.delete(player);
-    if (playerId !== undefined) {
-      discardPendingLaunchesForPlayer(playerId);
-      createdPlayerIds.delete(playerId);
-    }
-    playerReferences.delete(player);
-    playerIdByReference.delete(player);
-    if (player === managedPlayerReference) {
-      managedPlaybackSequence += 1;
-      managedPlayerId = undefined;
-      managedPlayerReference = undefined;
-    }
-    releasePlayerDedupeState(player);
-  }
-});
+api.menu.addItem(api.menu.item('Open Jellyfin Library', openCatalog, { keyBinding: 'Alt+Meta+j' }));
+api.menu.addItem(api.menu.item('Reveal Jellyfin Diagnostic Log', () => diagnosticLog.reveal()));
 
-api.global.onMessage(PLAYER_MESSAGES.state, (data, player) => {
-  if (player === undefined) return;
-  const state = parsePublicPlayerState(data);
-  if (state === undefined) return;
-  const terminal = state.status === 'stopped' || state.status === 'error';
-  const closed = closedGenerations.has(`${player}:${state.generation}`);
-  if (!playerReferences.has(player) && !closed) return;
-  if (closed) {
-    if (terminal) {
-      invalidateCatalogOnce(
-        player,
-        state.generation,
-        'ended',
-        'playback-ended',
-        publicCatalogState(state),
-      );
-    }
-    return;
+setInterval(() => {
+  try {
+    if (consumeCatalogOpenRequest(api.preferences)) openCatalog();
+    if (consumeDiagnosticLogRevealRequest(api.preferences)) diagnosticLog.reveal();
+  } catch (error) {
+    logger.warn('Could not handle a request from plugin preferences', error);
   }
-
-  let catalogState = catalogPlaybackStates.get(player);
-  if (catalogState === undefined || catalogState.generation !== state.generation) {
-    catalogState = {
-      generation: state.generation,
-      started: false,
-      terminal: false,
-    };
-    catalogPlaybackStates.set(player, catalogState);
-  }
-  if (state.itemId !== undefined) catalogState.itemId = state.itemId;
-  if (state.status === 'playing') {
-    catalogState.started = true;
-    invalidateCatalogOnce(
-      player,
-      state.generation,
-      'started',
-      'playback-started',
-      publicCatalogState(state),
-    );
-  }
-  if (terminal) {
-    catalogState.terminal = true;
-    invalidateCatalogOnce(
-      player,
-      state.generation,
-      'ended',
-      'playback-ended',
-      publicCatalogState(state),
-    );
-  }
-
-  if (state.stopReason !== 'completed' || catalogState.itemId === undefined) return;
-  const completionKey = `${player}:${state.generation}`;
-  if (completedGenerations.has(completionKey)) return;
-  completedGenerations.add(completionKey);
-  void sendSeriesCorrectUpNext(player, state.generation, catalogState.itemId).catch((error) =>
-    logger.warn('Could not prepare Up Next', error),
-  );
-});
-
-api.global.onMessage(PLAYER_MESSAGES.playNext, (data, player) => {
-  const itemId = (data as { itemId?: unknown }).itemId;
-  if (player === undefined || typeof itemId !== 'string') return;
-  void (async () => {
-    const managed = player === managedPlayerReference;
-    const managedSequence = managed ? ++managedPlaybackSequence : undefined;
-    try {
-      const request = PlaybackRequestSchema.parse({ itemId });
-      const { launch, publicPlan } = await prepareLaunch(request);
-      assertManagedPlaybackSequence(managedSequence);
-      pendingCatalogConfirmation = undefined;
-      if (launch.plan.requiresVideoTranscodeConfirmation) {
-        // Autoplay never starts a video re-encode without a catalog confirmation.
-        pendingCatalogConfirmation = {
-          itemId,
-          plan: publicPlan,
-          openInNewWindow: !managed,
-          connectionGeneration,
-        };
-        if (managedSequence !== undefined) {
-          pendingCatalogConfirmation.managedSequence = managedSequence;
-        }
-        openCatalog();
-        return;
-      }
-      prunePendingLaunches();
-      const pending: PendingLaunch = {
-        launch,
-        createdAt: Date.now(),
-        generation: connectionGeneration,
-        managed,
-        createdPlayer: false,
-      };
-      if (managedSequence !== undefined) pending.managedSequence = managedSequence;
-      const playerId = playerIdByReference.get(player);
-      if (playerId !== undefined) pending.playerId = playerId;
-      registerPendingLaunch(launch.nonce, pending);
-      try {
-        api.global.postMessage(player, PLAYER_MESSAGES.replace, { nonce: launch.nonce });
-      } catch (error) {
-        pendingLaunches.delete(launch.nonce);
-        throw error;
-      }
-    } catch (error) {
-      logger.warn('Could not start Up Next', error);
-    }
-  })();
-});
-
-api.global.onMessage(PLAYER_MESSAGES.catalogOpen, () => openCatalog());
+}, 500);
 
 logger.info('Global Jellyfin integration ready');

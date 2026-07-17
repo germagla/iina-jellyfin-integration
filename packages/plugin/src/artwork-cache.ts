@@ -268,9 +268,12 @@ export class ArtworkCache {
   }
 
   private loadIndex(): CacheIndex {
-    const raw = this.file.read(INDEX_PATH);
-    if (raw === undefined) return emptyIndex();
     try {
+      if (!this.file.exists(INDEX_PATH)) return emptyIndex();
+
+      const raw = this.file.read(INDEX_PATH);
+      if (raw === undefined) return emptyIndex();
+
       const parsed: unknown = JSON.parse(raw);
       if (!isRecord(parsed) || parsed.version !== 2 || !isRecord(parsed.entries)) {
         this.purgeLegacyEntries(parsed);

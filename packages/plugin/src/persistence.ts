@@ -1,5 +1,10 @@
 import { ConnectionMetadataSchema, type ConnectionMetadata } from '@iina-jellyfin/core';
-import { CONNECTION_PREFERENCE_KEY, DEVICE_ID_PREFERENCE_KEY, KEYCHAIN_SERVICE } from './constants';
+import {
+  CONNECTION_PREFERENCE_KEY,
+  DEVICE_ID_PREFERENCE_KEY,
+  KEYCHAIN_ACCOUNT,
+  KEYCHAIN_SERVICE,
+} from './constants';
 import { createStableDeviceId } from './ids';
 
 export interface PreferenceApi {
@@ -9,8 +14,8 @@ export interface PreferenceApi {
 }
 
 export interface KeychainApi {
-  keyChainRead(service: string, name: string): string | false;
-  keyChainWrite(service: string, name: string, password: string): boolean;
+  read(service: string, name: string): string | false;
+  write(service: string, name: string, password: string): boolean;
 }
 
 interface CredentialEnvelope {
@@ -19,10 +24,6 @@ interface CredentialEnvelope {
   serverId: string;
   userId: string;
   accessToken: string;
-}
-
-export function keychainAccount(metadata: Pick<ConnectionMetadata, 'serverId' | 'userId'>): string {
-  return `${metadata.serverId}:${metadata.userId}`;
 }
 
 export class ConnectionStore {
@@ -51,7 +52,7 @@ export class ConnectionStore {
   }
 
   readAccessToken(metadata: ConnectionMetadata): string | undefined {
-    const value = this.keychain.keyChainRead(KEYCHAIN_SERVICE, keychainAccount(metadata));
+    const value = this.keychain.read(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
     if (typeof value !== 'string' || value.length === 0) return undefined;
     try {
       const envelope = JSON.parse(value) as Partial<CredentialEnvelope>;
@@ -71,15 +72,7 @@ export class ConnectionStore {
   save(metadata: ConnectionMetadata, accessToken: string): void {
     if (accessToken.length === 0) throw new TypeError('Access token cannot be empty');
     const validated = ConnectionMetadataSchema.parse(metadata);
-    const previousMetadata = this.readMetadata();
-    const account = keychainAccount(validated);
-    const previousCredential = this.keychain.keyChainRead(KEYCHAIN_SERVICE, account);
-    const previousAccount =
-      previousMetadata === undefined ? undefined : keychainAccount(previousMetadata);
-    const previousAccountCredential =
-      previousAccount === undefined || previousAccount === account
-        ? false
-        : this.keychain.keyChainRead(KEYCHAIN_SERVICE, previousAccount);
+    const previousCredential = this.keychain.read(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
     const envelope: CredentialEnvelope = {
       version: 1,
       serverUrl: validated.serverUrl,
@@ -87,26 +80,8 @@ export class ConnectionStore {
       userId: validated.userId,
       accessToken,
     };
-    if (!this.keychain.keyChainWrite(KEYCHAIN_SERVICE, account, JSON.stringify(envelope))) {
+    if (!this.keychain.write(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, JSON.stringify(envelope))) {
       throw new Error('macOS Keychain did not accept the Jellyfin access token.');
-    }
-
-    let previousAccountCleared = false;
-    if (
-      previousAccount !== undefined &&
-      previousAccount !== account &&
-      typeof previousAccountCredential === 'string' &&
-      previousAccountCredential.length > 0
-    ) {
-      if (!this.keychain.keyChainWrite(KEYCHAIN_SERVICE, previousAccount, '')) {
-        this.keychain.keyChainWrite(
-          KEYCHAIN_SERVICE,
-          account,
-          typeof previousCredential === 'string' ? previousCredential : '',
-        );
-        throw new Error('macOS Keychain did not remove the previous Jellyfin access token.');
-      }
-      previousAccountCleared = true;
     }
 
     const previousPreference = this.preferences.get(CONNECTION_PREFERENCE_KEY);
@@ -114,37 +89,36 @@ export class ConnectionStore {
       this.preferences.set(CONNECTION_PREFERENCE_KEY, JSON.stringify(validated));
       this.preferences.sync();
     } catch (error) {
-      if (previousAccountCleared && previousAccount !== undefined) {
-        this.keychain.keyChainWrite(
+      let rollbackFailed = false;
+      try {
+        rollbackFailed = !this.keychain.write(
           KEYCHAIN_SERVICE,
-          previousAccount,
-          previousAccountCredential as string,
+          KEYCHAIN_ACCOUNT,
+          typeof previousCredential === 'string' ? previousCredential : '',
+        );
+      } catch {
+        rollbackFailed = true;
+      }
+      try {
+        this.preferences.set(CONNECTION_PREFERENCE_KEY, previousPreference ?? '');
+        this.preferences.sync();
+      } catch {
+        rollbackFailed = true;
+      }
+      if (rollbackFailed) {
+        throw new Error(
+          'The previous Jellyfin connection could not be restored safely. Please reconnect.',
         );
       }
-      this.keychain.keyChainWrite(
-        KEYCHAIN_SERVICE,
-        account,
-        typeof previousCredential === 'string' ? previousCredential : '',
-      );
-      this.preferences.set(CONNECTION_PREFERENCE_KEY, previousPreference ?? '');
-      this.preferences.sync();
       throw error;
     }
   }
 
   clear(): void {
-    const metadata = this.readMetadata();
-    if (metadata !== undefined) {
-      // IINA 1.4 exposes no delete operation; an empty value makes the credential unusable.
-      const account = keychainAccount(metadata);
-      const credential = this.keychain.keyChainRead(KEYCHAIN_SERVICE, account);
-      if (
-        typeof credential === 'string' &&
-        credential.length > 0 &&
-        !this.keychain.keyChainWrite(KEYCHAIN_SERVICE, account, '')
-      ) {
-        throw new Error('macOS Keychain did not remove the Jellyfin access token.');
-      }
+    // IINA 1.4 exposes no delete operation. Always overwrite the single V1
+    // credential so a failed read cannot leave a usable token behind.
+    if (!this.keychain.write(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, '')) {
+      throw new Error('macOS Keychain did not remove the Jellyfin access token.');
     }
     this.preferences.set(CONNECTION_PREFERENCE_KEY, '');
     this.preferences.sync();

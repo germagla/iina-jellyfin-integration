@@ -16,10 +16,39 @@ import {
 import { demoShowDetails } from '../src/demo/catalog';
 import { CatalogApp } from '../src/catalog/CatalogApp';
 import { safeArtworkSource } from '../src/catalog/Artwork';
+import { GridScreen, HomeScreen, SearchScreen } from '../src/catalog/LibraryScreens';
 
 afterEach(() => {
   vi.useRealTimers();
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function rect(width: number, top = 0, height = 200): DOMRect {
+  return {
+    x: 0,
+    y: top,
+    width,
+    height,
+    top,
+    right: width,
+    bottom: top + height,
+    left: 0,
+    toJSON: () => ({}),
+  };
+}
 
 class RaceBridge extends MockBridge {
   override async request<K extends BridgeOperation>(
@@ -78,7 +107,385 @@ class MultiSeasonBridge extends MockBridge {
   }
 }
 
+class SlowQuickConnectBridge extends MockBridge {
+  pollCount = 0;
+
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'connection.quickConnect.poll') {
+      this.pollCount += 1;
+      return new Promise<BridgeResultMap[K]>(() => undefined);
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class MultipleLibrariesBridge extends MockBridge {
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query' && (payload as { kind?: string }).kind === 'libraries') {
+      return {
+        Items: [
+          { Id: 'anime', Name: 'Anime', Type: 'CollectionFolder', CollectionType: 'tvshows' },
+          { Id: 'films', Name: 'Films', Type: 'CollectionFolder', CollectionType: 'movies' },
+          { Id: 'kids-tv', Name: 'Kids TV', Type: 'CollectionFolder', CollectionType: 'tvshows' },
+          { Id: 'music', Name: 'Music', Type: 'CollectionFolder', CollectionType: 'music' },
+        ],
+        TotalRecordCount: 4,
+        StartIndex: 0,
+      } as BridgeResultMap[K];
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class LongHomeBridge extends MockBridge {
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      if (query.kind === 'home') {
+        const label =
+          query.shelf === 'continueWatching'
+            ? 'Continue Watching'
+            : query.shelf === 'nextUp'
+              ? 'Next Up'
+              : 'Recently Added';
+        return {
+          Items: Array.from({ length: 20 }, (_, index) => ({
+            Id: `${query.shelf}-${index + 1}`,
+            Name: `${label} ${index + 1}`,
+            Type: 'Movie',
+          })),
+          TotalRecordCount: 20,
+          StartIndex: 0,
+        } as BridgeResultMap[K];
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class ChangingHomeBridge extends LongHomeBridge {
+  private itemCount?: number;
+
+  reduceShelves(): void {
+    this.itemCount = 2;
+  }
+
+  emptyShelves(): void {
+    this.itemCount = 0;
+  }
+
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (this.itemCount !== undefined && operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      if (query.kind === 'home') {
+        const label =
+          query.shelf === 'continueWatching'
+            ? 'Continue Watching'
+            : query.shelf === 'nextUp'
+              ? 'Next Up'
+              : 'Recently Added';
+        return {
+          Items: Array.from({ length: this.itemCount }, (_, index) => ({
+            Id: `${query.shelf}-${index + 1}`,
+            Name: `${label} ${index + 1}`,
+            Type: 'Movie',
+          })),
+          TotalRecordCount: this.itemCount,
+          StartIndex: 0,
+        } as BridgeResultMap[K];
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
+type PausedCatalogKind = Extract<
+  BridgePayload<'catalog.query'>,
+  { kind: 'home' | 'library' | 'search' }
+>['kind'];
+
+class PausableCatalogBridge extends MockBridge {
+  private gate?: ReturnType<typeof deferred<void>>;
+  private pausedKinds = new Set<PausedCatalogKind>();
+  private failWhenReleased = false;
+
+  pause(kinds: PausedCatalogKind[], failWhenReleased = false): void {
+    this.gate = deferred<void>();
+    this.pausedKinds = new Set(kinds);
+    this.failWhenReleased = failWhenReleased;
+  }
+
+  release(): void {
+    const gate = this.gate;
+    this.gate = undefined;
+    gate?.resolve();
+  }
+
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      const gate = this.gate;
+      if (
+        gate !== undefined &&
+        (query.kind === 'home' || query.kind === 'library' || query.kind === 'search') &&
+        this.pausedKinds.has(query.kind)
+      ) {
+        await gate.promise;
+        if (this.failWhenReleased) throw new Error('The Jellyfin server is temporarily offline.');
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class SequencedSearchBridge extends MockBridge {
+  searchRequests = 0;
+  private readonly older = deferred<BridgeResultMap['catalog.query']>();
+  private readonly newer = deferred<BridgeResultMap['catalog.query']>();
+
+  resolveOlder(): void {
+    this.older.resolve({
+      Items: [{ Id: 'stale-result', Name: 'Stale Result', Type: 'Movie' }],
+      TotalRecordCount: 1,
+      StartIndex: 0,
+    });
+  }
+
+  resolveNewer(): void {
+    this.newer.resolve({
+      Items: [{ Id: 'fresh-result', Name: 'Fresh Result', Type: 'Movie' }],
+      TotalRecordCount: 1,
+      StartIndex: 0,
+    });
+  }
+
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query' && (payload as { kind?: string }).kind === 'search') {
+      this.searchRequests += 1;
+      if (this.searchRequests > 1) {
+        await super.request(operation, payload);
+        return (this.searchRequests === 2 ? this.older.promise : this.newer.promise) as Promise<
+          BridgeResultMap[K]
+        >;
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class ShrinkingLibraryBridge extends MockBridge {
+  private isShrunk = false;
+
+  shrink(): void {
+    this.isShrunk = true;
+  }
+
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (
+      this.isShrunk &&
+      operation === 'catalog.query' &&
+      (payload as { kind?: string }).kind === 'library'
+    ) {
+      await super.request(operation, payload);
+      const query = payload as BridgePayload<'catalog.query'> & { kind: 'library' };
+      return {
+        Items:
+          query.startIndex === 0
+            ? Array.from({ length: 5 }, (_, index) => ({
+                Id: `remaining-${index + 1}`,
+                Name: `Remaining ${index + 1}`,
+                Type: 'Movie',
+              }))
+            : [],
+        TotalRecordCount: 5,
+        StartIndex: query.startIndex,
+      } as BridgeResultMap[K];
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class EmptySeriesBridge extends MockBridge {
+  episodeRequests = 0;
+
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      if (query.kind === 'details') {
+        return {
+          Id: 'series-without-media',
+          Name: 'MARRIAGETOXIN',
+          Type: 'Series',
+          RunTimeTicks: 14_400_000_000,
+          UserData: { PlaybackPositionTicks: 2_000_000_000, PlayedPercentage: 20 },
+          MediaSources: [{ Id: 'not-a-playable-series-source', MediaStreams: [] }],
+        } as BridgeResultMap[K];
+      }
+      if (query.kind === 'episodes') {
+        this.episodeRequests += 1;
+        return {
+          Items: [
+            {
+              Id: `virtual-${query.startIndex}`,
+              Name: 'Missing episode',
+              Type: 'Episode',
+              LocationType: 'Virtual',
+            },
+          ],
+          TotalRecordCount: Number.MAX_SAFE_INTEGER,
+          StartIndex: query.startIndex,
+        } as BridgeResultMap[K];
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
 describe('catalog journey', () => {
+  it('starts with the standard local Jellyfin address', () => {
+    render(<CatalogApp bridge={new MockBridge(false)} initialConnected={false} />);
+
+    expect(screen.getByLabelText('Server address')).toHaveValue('http://localhost:8096');
+    expect(screen.getByRole('note')).toHaveTextContent('Local HTTP is unencrypted');
+  });
+
+  it('accepts a bare localhost address and submits one canonical URL', async () => {
+    const bridge = new MockBridge(false);
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={bridge} initialConnected={false} />);
+
+    await user.clear(screen.getByLabelText('Server address'));
+    await user.type(screen.getByLabelText('Server address'), 'localhost:8096/jellyfin/');
+    await user.type(screen.getByLabelText('Username'), 'alex');
+    await user.type(screen.getByLabelText('Password'), 'password');
+    await user.click(screen.getByRole('button', { name: 'Connect' }));
+
+    expect(await screen.findByRole('heading', { name: 'Library', level: 1 })).toBeInTheDocument();
+    expect(
+      bridge.requests.filter(
+        (request) =>
+          request.operation === 'connection.probe' ||
+          request.operation === 'connection.login.password',
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        operation: 'connection.probe',
+        payload: {
+          serverUrl: 'http://localhost:8096/jellyfin',
+          allowInsecureRemote: false,
+        },
+      }),
+      expect.objectContaining({
+        operation: 'connection.login.password',
+        payload: {
+          serverUrl: 'http://localhost:8096/jellyfin',
+          username: 'alex',
+          password: 'password',
+          allowInsecureRemote: false,
+        },
+      }),
+    ]);
+  });
+
+  it('normalizes a bare localhost address before starting Quick Connect', async () => {
+    const bridge = new MockBridge(false);
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={bridge} initialConnected={false} />);
+
+    await user.clear(screen.getByLabelText('Server address'));
+    await user.type(screen.getByLabelText('Server address'), 'localhost:8096');
+    await user.click(screen.getByRole('button', { name: 'Quick Connect' }));
+
+    expect(await screen.findByText('842916')).toBeInTheDocument();
+    expect(
+      bridge.requests.filter(
+        (request) =>
+          request.operation === 'connection.probe' ||
+          request.operation === 'connection.quickConnect.start',
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        operation: 'connection.probe',
+        payload: { serverUrl: 'http://localhost:8096', allowInsecureRemote: false },
+      }),
+      expect.objectContaining({
+        operation: 'connection.quickConnect.start',
+        payload: { serverUrl: 'http://localhost:8096', allowInsecureRemote: false },
+      }),
+    ]);
+  });
+
+  it('does not overlap slow Quick Connect polls', async () => {
+    vi.useFakeTimers();
+    const bridge = new SlowQuickConnectBridge(false);
+    render(<CatalogApp bridge={bridge} initialConnected={false} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Quick Connect' }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('842916')).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(6_500);
+    });
+    expect(bridge.pollCount).toBe(1);
+  });
+
+  it('stays connected and reports an error when secure disconnect fails', async () => {
+    const bridge = new MockBridge(true, {
+      'connection.disconnect': new Error('macOS Keychain could not remove the access token.'),
+    });
+    render(<CatalogApp bridge={bridge} initialConnected />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect from Jellyfin' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('macOS Keychain');
+    expect(screen.getByRole('heading', { name: 'Library', level: 1 })).toBeInTheDocument();
+  });
+
+  it('clears a stale address error as soon as the address is edited', async () => {
+    const bridge = new MockBridge(false);
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={bridge} initialConnected={false} />);
+
+    await user.clear(screen.getByLabelText('Server address'));
+    await user.type(screen.getByLabelText('Server address'), 'not a valid address');
+    await user.type(screen.getByLabelText('Username'), 'alex');
+    await user.type(screen.getByLabelText('Password'), 'password');
+    await user.click(screen.getByRole('button', { name: 'Connect' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('not valid');
+    expect(bridge.requests).toHaveLength(0);
+
+    await user.clear(screen.getByLabelText('Server address'));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('requires explicit acknowledgement before password login to remote HTTP', async () => {
     const bridge = new MockBridge(false);
     const user = userEvent.setup();
@@ -134,18 +541,174 @@ describe('catalog journey', () => {
     expect(progress).not.toHaveAttribute('style');
   });
 
+  it('shows one responsive shelf row and expands all loaded items without horizontal paging', async () => {
+    let shelfWidth = 1_200;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.classList.contains('media-shelf') ? rect(shelfWidth) : rect(0);
+    });
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={new LongHomeBridge()} initialConnected initialRoute="home" />);
+
+    const heading = await screen.findByRole('heading', { name: 'Continue Watching' });
+    const section = heading.closest('section');
+    expect(section).not.toBeNull();
+    const shelf = within(section!);
+    const toggle = shelf.getByRole('button', { name: 'See all Continue Watching (20)' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(document.getElementById(toggle.getAttribute('aria-controls')!)).toBe(
+      section!.querySelector('.media-shelf'),
+    );
+    expect(shelf.getAllByRole('button', { name: /Open Continue Watching/ })).toHaveLength(6);
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(shelf.getAllByRole('button', { name: /Open Continue Watching/ })).toHaveLength(20);
+
+    await user.click(shelf.getByRole('button', { name: 'Show less Continue Watching' }));
+    const lastVisibleCard = shelf.getByRole('button', { name: 'Open Continue Watching 6' });
+    lastVisibleCard.focus();
+    shelfWidth = 358;
+    window.dispatchEvent(new Event('resize'));
+
+    await waitFor(() =>
+      expect(shelf.getAllByRole('button', { name: /Open Continue Watching/ })).toHaveLength(2),
+    );
+    expect(document.activeElement).toBe(toggle);
+
+    shelfWidth = 4_000;
+    window.dispatchEvent(new Event('resize'));
+    await waitFor(() =>
+      expect(shelf.queryByRole('button', { name: 'See all Continue Watching (20)' })).toBeNull(),
+    );
+    expect(document.activeElement).toBe(
+      shelf.getByRole('button', { name: 'Open Continue Watching 1' }),
+    );
+  });
+
+  it('preserves shelf keyboard focus when refreshed items disappear', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.classList.contains('media-shelf') ? rect(1_200) : rect(0);
+    });
+    const bridge = new ChangingHomeBridge();
+    const view = render(<HomeScreen bridge={bridge} refreshKey={0} onSelect={() => undefined} />);
+
+    const heading = await screen.findByRole('heading', { name: 'Continue Watching' });
+    const section = heading.closest('section');
+    expect(section).not.toBeNull();
+    const shelf = within(section!);
+    shelf.getByRole('button', { name: 'Open Continue Watching 6' }).focus();
+
+    bridge.reduceShelves();
+    view.rerender(<HomeScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
+
+    await waitFor(() =>
+      expect(shelf.getAllByRole('button', { name: /Open Continue Watching/ })).toHaveLength(2),
+    );
+    expect(document.activeElement).toBe(
+      shelf.getByRole('button', { name: 'Open Continue Watching 1' }),
+    );
+
+    bridge.emptyShelves();
+    view.rerender(<HomeScreen bridge={bridge} refreshKey={2} onSelect={() => undefined} />);
+
+    expect(await screen.findByText('Your library is quiet')).toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Library', level: 1 }));
+  });
+
+  it('keeps Home content visible while refreshing and retains it after a refresh failure', async () => {
+    const bridge = new PausableCatalogBridge();
+    const view = render(<HomeScreen bridge={bridge} refreshKey={0} onSelect={() => undefined} />);
+
+    expect(await screen.findByRole('heading', { name: 'Continue Watching' })).toBeInTheDocument();
+    bridge.pause(['home'], true);
+    view.rerender(<HomeScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
+
+    expect(screen.getByRole('heading', { name: 'Continue Watching' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Loading catalog')).toBeNull();
+    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+
+    bridge.release();
+    expect(await screen.findByText(/Couldn’t refresh:/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open Crossing Lines' })).toBeInTheDocument();
+  });
+
+  it('keeps a successful empty Home state visible when its refresh fails', async () => {
+    const bridge = new PausableCatalogBridge(true, {
+      'catalog.query': { Items: [], TotalRecordCount: 0, StartIndex: 0 },
+    });
+    const view = render(<HomeScreen bridge={bridge} refreshKey={0} onSelect={() => undefined} />);
+
+    expect(await screen.findByText('Your library is quiet')).toBeInTheDocument();
+    bridge.pause(['home'], true);
+    view.rerender(<HomeScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
+
+    expect(screen.getByText('Your library is quiet')).toBeInTheDocument();
+    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    bridge.release();
+
+    expect(await screen.findByText(/Couldn’t refresh:/)).toBeInTheDocument();
+    expect(screen.getByText('Your library is quiet')).toBeInTheDocument();
+  });
+
+  it('shows each supported Jellyfin library separately and scopes its grid query', async () => {
+    const bridge = new MultipleLibrariesBridge();
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={bridge} initialConnected initialRoute="home" />);
+
+    expect(await screen.findByRole('button', { name: 'Anime' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Films' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Kids TV' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Music' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Anime' }));
+    expect(await screen.findByRole('heading', { name: 'Anime', level: 1 })).toBeInTheDocument();
+    expect(
+      bridge.requests.some(
+        (request) =>
+          request.operation === 'catalog.query' &&
+          request.payload.kind === 'library' &&
+          request.payload.parentId === 'anime' &&
+          request.payload.itemType === 'Series',
+      ),
+    ).toBe(true);
+
+    await user.click(screen.getByRole('button', { name: 'Films' }));
+    expect(await screen.findByRole('heading', { name: 'Films', level: 1 })).toBeInTheDocument();
+    expect(
+      bridge.requests.some(
+        (request) =>
+          request.operation === 'catalog.query' &&
+          request.payload.kind === 'library' &&
+          request.payload.parentId === 'films' &&
+          request.payload.itemType === 'Movie',
+      ),
+    ).toBe(true);
+  });
+
   it('paginates and sorts a movie library', async () => {
     const bridge = new MockBridge();
     const user = userEvent.setup();
-    render(<CatalogApp bridge={bridge} initialConnected initialRoute="movies" />);
+    render(<CatalogApp bridge={bridge} initialConnected initialRoute="library" />);
 
     expect(await screen.findByText('The Quiet Orbit')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Next page' }));
     expect(await screen.findByText('Windward')).toBeInTheDocument();
-    expect(screen.getByText('Page 2 of 2')).toBeInTheDocument();
+    expect(screen.getByText(/Page 2 of 2/)).toBeInTheDocument();
+
+    document.documentElement.scrollTop = 640;
+    await user.click(screen.getByRole('button', { name: 'Open Windward' }));
+    expect(document.documentElement.scrollTop).toBe(0);
+    await user.click(await screen.findByRole('button', { name: 'Back' }));
+    expect(document.documentElement.scrollTop).toBe(640);
+    expect(screen.getByText('Windward')).toBeInTheDocument();
+    expect(screen.getByText(/Page 2 of 2/)).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText('Sort by'), 'title');
-    await waitFor(() => expect(screen.getByText('Page 1 of 2')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Page 1 of 2/)).toBeInTheDocument());
     expect(
       bridge.requests.some(
         (request) =>
@@ -154,6 +717,125 @@ describe('catalog journey', () => {
           request.payload.sortBy === 'SortName',
       ),
     ).toBe(true);
+  });
+
+  it('fills complete responsive library rows and anchors the visible range after resizing', async () => {
+    let gridWidth = 1_400;
+    let gridTop = 220;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1512 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 982 });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.classList.contains('catalog-grid-region')
+        ? rect(gridWidth, gridTop, 700)
+        : rect(0);
+    });
+    const bridge = new MockBridge();
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={bridge} initialConnected initialRoute="library" />);
+
+    expect(await screen.findByText(/Showing 1–16 of 24 · Page 1 of 2/)).toBeInTheDocument();
+    expect(
+      bridge.requests
+        .filter(
+          (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
+        )
+        .at(-1)?.payload,
+    ).toMatchObject({ startIndex: 0, limit: 16 });
+
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText(/Showing 17–24 of 24 · Page 2 of 2/)).toBeInTheDocument();
+
+    const requestCountBeforeHide = bridge.requests.filter(
+      (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
+    ).length;
+    gridWidth = 0;
+    window.dispatchEvent(new Event('resize'));
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 175));
+    });
+    expect(
+      bridge.requests.filter(
+        (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
+      ),
+    ).toHaveLength(requestCountBeforeHide);
+    expect(screen.getByText(/Showing 17–24 of 24 · Page 2 of 2/)).toBeInTheDocument();
+
+    gridWidth = 1_020;
+    gridTop = 220;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
+    window.dispatchEvent(new Event('resize'));
+
+    await waitFor(() =>
+      expect(
+        bridge.requests
+          .filter(
+            (request) =>
+              request.operation === 'catalog.query' && request.payload.kind === 'library',
+          )
+          .at(-1)?.payload,
+      ).toMatchObject({ startIndex: 12, limit: 12 }),
+    );
+    expect(await screen.findByText(/Showing 13–24 of 24 · Page 2 of 2/)).toBeInTheDocument();
+  });
+
+  it('keeps a library page visible during a background refresh', async () => {
+    const bridge = new PausableCatalogBridge();
+    const view = render(
+      <GridScreen
+        bridge={bridge}
+        refreshKey={0}
+        library={{ id: 'library-movies', name: 'Movies', kind: 'movie' }}
+        onSelect={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText('The Quiet Orbit')).toBeInTheDocument();
+    bridge.pause(['library']);
+    view.rerender(
+      <GridScreen
+        bridge={bridge}
+        refreshKey={1}
+        library={{ id: 'library-movies', name: 'Movies', kind: 'movie' }}
+        onSelect={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText('The Quiet Orbit')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Loading catalog')).toBeNull();
+    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    bridge.release();
+    await waitFor(() => expect(screen.queryByText('Updating…')).toBeNull());
+  });
+
+  it('clamps back to the final valid page when a library total shrinks', async () => {
+    const bridge = new ShrinkingLibraryBridge();
+    const user = userEvent.setup();
+    const library = { id: 'library-movies', name: 'Movies', kind: 'movie' } as const;
+    const view = render(
+      <GridScreen bridge={bridge} refreshKey={0} library={library} onSelect={() => undefined} />,
+    );
+
+    expect(await screen.findByText('The Quiet Orbit')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText('Windward')).toBeInTheDocument();
+
+    bridge.shrink();
+    view.rerender(
+      <GridScreen bridge={bridge} refreshKey={1} library={library} onSelect={() => undefined} />,
+    );
+
+    expect(await screen.findByText('Remaining 1')).toBeInTheDocument();
+    expect(screen.queryByText('Windward')).toBeNull();
+    expect(
+      bridge.requests
+        .filter(
+          (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
+        )
+        .at(-1)?.payload,
+    ).toMatchObject({ startIndex: 0, limit: 12 });
   });
 
   it('debounces search and ignores the pre-debounce interval', async () => {
@@ -178,6 +860,78 @@ describe('catalog journey', () => {
       await Promise.resolve();
     });
     expect(screen.getByText('Horizons')).toBeInTheDocument();
+  });
+
+  it('preserves a search query and its results after opening details and going back', async () => {
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={new MockBridge()} initialConnected initialRoute="search" />);
+
+    await user.type(screen.getByRole('searchbox'), 'Horizons');
+    await user.click(await screen.findByRole('button', { name: 'Open Horizons' }));
+    await user.click(await screen.findByRole('button', { name: 'Back' }));
+
+    expect(screen.getByRole('searchbox')).toHaveValue('Horizons');
+    expect(screen.getByText('Horizons')).toBeInTheDocument();
+  });
+
+  it('keeps committed search results visible during a background refresh', async () => {
+    const bridge = new PausableCatalogBridge();
+    const user = userEvent.setup();
+    const view = render(<SearchScreen bridge={bridge} refreshKey={0} onSelect={() => undefined} />);
+
+    await user.type(screen.getByRole('searchbox'), 'Horizons');
+    expect(await screen.findByText('Horizons')).toBeInTheDocument();
+
+    bridge.pause(['search']);
+    view.rerender(<SearchScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
+
+    expect(screen.getByText('Horizons')).toBeInTheDocument();
+    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    bridge.release();
+
+    await waitFor(() => expect(screen.queryByText('Updating…')).toBeNull());
+    expect(screen.getByText('Horizons')).toBeInTheDocument();
+  });
+
+  it('keeps a committed no-matches state visible when its refresh fails', async () => {
+    const bridge = new PausableCatalogBridge();
+    const user = userEvent.setup();
+    const view = render(<SearchScreen bridge={bridge} refreshKey={0} onSelect={() => undefined} />);
+
+    await user.type(screen.getByRole('searchbox'), 'No Such Title');
+    expect(await screen.findByText('No matches')).toBeInTheDocument();
+
+    bridge.pause(['search'], true);
+    view.rerender(<SearchScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
+
+    expect(screen.getByText('No matches')).toBeInTheDocument();
+    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    bridge.release();
+
+    expect(await screen.findByText(/Couldn’t refresh:/)).toBeInTheDocument();
+    expect(screen.getByText('No matches')).toBeInTheDocument();
+  });
+
+  it('ignores a stale search response that resolves after a newer refresh', async () => {
+    const bridge = new SequencedSearchBridge();
+    const user = userEvent.setup();
+    const view = render(<SearchScreen bridge={bridge} refreshKey={0} onSelect={() => undefined} />);
+
+    await user.type(screen.getByRole('searchbox'), 'Horizons');
+    expect(await screen.findByText('Horizons')).toBeInTheDocument();
+
+    view.rerender(<SearchScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
+    await waitFor(() => expect(bridge.searchRequests).toBe(2));
+    view.rerender(<SearchScreen bridge={bridge} refreshKey={2} onSelect={() => undefined} />);
+    await waitFor(() => expect(bridge.searchRequests).toBe(3));
+
+    bridge.resolveNewer();
+    expect(await screen.findByText('Fresh Result')).toBeInTheDocument();
+    bridge.resolveOlder();
+    await act(async () => Promise.resolve());
+
+    expect(screen.getByText('Fresh Result')).toBeInTheDocument();
+    expect(screen.queryByText('Stale Result')).toBeNull();
   });
 
   it('supports track choices, transcode confirmation, and opening a new window', async () => {
@@ -215,6 +969,9 @@ describe('catalog journey', () => {
       openInNewWindow: false,
       startPositionTicks: 14_520_000_000,
     });
+    expect(
+      bridge.requests.filter((request) => request.operation === 'playback.start').at(1)?.payload,
+    ).toMatchObject({ videoTranscodeConfirmationId: 'demo-transcode-confirmation' });
 
     await user.selectOptions(screen.getByLabelText('Version'), 'source-1080');
     expect(screen.getByLabelText('Audio')).toHaveValue('1');
@@ -227,6 +984,114 @@ describe('catalog journey', () => {
           request.operation === 'playback.start' && request.payload.openInNewWindow === true,
       ),
     ).toBe(true);
+  });
+
+  it('keeps a multi-row episode grid in document flow after the details content', () => {
+    const episodes = Array.from({ length: 10 }, (_, index) => ({
+      ...demoShowDetails.episodes[index % demoShowDetails.episodes.length]!,
+      id: `episode-${index + 1}`,
+      episodeNumber: index + 1,
+      title: `Episode ${index + 1}`,
+    }));
+    const { container } = render(
+      <CatalogApp
+        bridge={new MockBridge()}
+        initialConnected
+        initialRoute="details"
+        showOverride={{ ...demoShowDetails, episodes }}
+      />,
+    );
+
+    const detailsContent = container.querySelector<HTMLElement>('.details-content');
+    const episodeSection = container.querySelector<HTMLElement>('.episode-section');
+    const detailsScreen = container.querySelector<HTMLElement>('.details-screen');
+
+    expect(detailsContent).not.toBeNull();
+    expect(episodeSection).not.toBeNull();
+    expect(detailsScreen).not.toBeNull();
+    expect(detailsContent!.compareDocumentPosition(episodeSection!)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(window.getComputedStyle(episodeSection!).position).toBe('relative');
+    expect(window.getComputedStyle(detailsScreen!).overflowX).toBe('hidden');
+    expect(window.getComputedStyle(detailsScreen!).overflowY).not.toBe('hidden');
+    expect(within(episodeSection!).getAllByRole('button')).toHaveLength(10);
+  });
+
+  it('does not offer playback for a series with no playable episodes', async () => {
+    const bridge = new EmptySeriesBridge();
+
+    render(<CatalogApp bridge={bridge} initialConnected initialRoute="details" />);
+
+    expect(
+      await screen.findByText('No playable episodes are available in this series.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Resume Episode/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Play from Beginning/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open in New Window' })).toBeNull();
+    expect(screen.queryByLabelText('Version')).toBeNull();
+    expect(
+      bridge.requests.filter((request) => request.operation === 'playback.start'),
+    ).toHaveLength(0);
+    expect(bridge.episodeRequests).toBe(25);
+  });
+
+  it('does not replace an unavailable direct episode with the first episode in its series', () => {
+    const unavailableEpisode = {
+      ...demoShowDetails,
+      id: 'missing-episode',
+      kind: 'episode',
+      playable: false,
+      episodeTitle: 'Missing episode',
+      episodeLabel: 'S1 · E99',
+      progress: 0,
+      playbackPositionTicks: 0,
+      versions: [],
+    } satisfies ShowDetails;
+
+    render(
+      <CatalogApp
+        bridge={new MockBridge()}
+        initialConnected
+        initialRoute="details"
+        showOverride={unavailableEpisode}
+      />,
+    );
+
+    expect(screen.getAllByText('S1 · E99 · Missing episode')).toHaveLength(2);
+    expect(screen.getByText('This item is not available for playback.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Play Episode|Resume Episode/ })).toBeNull();
+  });
+
+  it('offers Play rather than Resume for an unstarted episode', async () => {
+    const bridge = new MockBridge();
+    const unstartedEpisode = {
+      ...demoShowDetails,
+      id: 'unstarted-episode',
+      kind: 'episode',
+      episodeTitle: 'Pilot',
+      episodeLabel: 'S1 · E1',
+      progress: 0,
+      playbackPositionTicks: 0,
+      episodes: [],
+    } satisfies ShowDetails;
+    const user = userEvent.setup();
+
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={unstartedEpisode}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: /Resume Episode/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Play from Beginning/ })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Play Episode' }));
+    expect(
+      bridge.requests.filter((request) => request.operation === 'playback.start').at(-1)?.payload,
+    ).toMatchObject({ itemId: 'unstarted-episode', startPositionTicks: 0 });
   });
 
   it('preserves new-window intent while confirming a video transcode', async () => {
@@ -250,7 +1115,7 @@ describe('catalog journey', () => {
       bridge.requests.filter((request) => request.operation === 'playback.start').at(-1)?.payload,
     ).toMatchObject({
       openInNewWindow: true,
-      videoTranscodeApproved: true,
+      videoTranscodeConfirmationId: 'demo-transcode-confirmation',
       mediaSourceId: 'source-4k',
       startPositionTicks: 14_520_000_000,
     });
@@ -259,40 +1124,46 @@ describe('catalog journey', () => {
     ).toBeInTheDocument();
   });
 
-  it('opens catalog confirmation for an Up Next video transcode event', async () => {
-    const bridge = new MockBridge();
-    const user = userEvent.setup();
-    render(<CatalogApp bridge={bridge} initialConnected initialRoute="home" />);
-
-    act(() => {
-      bridge.emitPlaybackConfirmation({
-        itemId: 'horizons-episode-4',
-        source: 'up-next',
-        openInNewWindow: true,
+  it('requires another review when a transcode permit expires or the plan changes', async () => {
+    const bridge = new MockBridge(true, {
+      'playback.start': {
+        status: 'confirmation-required',
+        confirmationId: 'renewed-transcode-confirmation',
         plan: {
           playMethod: 'Transcode',
           conversion: 'video',
           requiresVideoTranscodeConfirmation: true,
           transcodeReasons: ['VideoCodecNotSupported'],
           mediaSourceId: 'source-4k',
-          audioStreamIndex: 6,
-          subtitleStreamIndex: -1,
         },
-      });
+      },
     });
+    const user = userEvent.setup();
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
 
-    const modal = await screen.findByRole('dialog', { name: 'Video conversion required' });
+    await user.selectOptions(screen.getByLabelText('Version'), 'source-4k');
+    await user.click(screen.getByRole('button', { name: /Resume Episode/ }));
+    let modal = await screen.findByRole('dialog', { name: 'Video conversion required' });
     await user.click(within(modal).getByRole('button', { name: 'Convert and Play' }));
+
+    expect(
+      await screen.findByText(
+        'The playback plan changed or the approval expired. Review it and confirm again.',
+      ),
+    ).toBeInTheDocument();
+    modal = screen.getByRole('dialog', { name: 'Video conversion required' });
+    expect(modal).toBeInTheDocument();
     expect(
       bridge.requests.filter((request) => request.operation === 'playback.start').at(-1)?.payload,
     ).toMatchObject({
-      itemId: 'horizons-episode-4',
-      startPositionTicks: 0,
-      mediaSourceId: 'source-4k',
-      audioStreamIndex: 6,
-      subtitleStreamIndex: -1,
-      openInNewWindow: true,
-      videoTranscodeApproved: true,
+      videoTranscodeConfirmationId: 'renewed-transcode-confirmation',
     });
   });
 
@@ -440,6 +1311,42 @@ describe('Jellyfin item adapters', () => {
     expect(details.versions[1]?.audioTracks.map((track) => track.id)).toEqual(['9']);
   });
 
+  it('treats a series as a non-playable container even when it has runtime metadata', () => {
+    const details = showDetailsFromResult({
+      Id: 'empty-series',
+      Name: 'MARRIAGETOXIN',
+      Type: 'Series',
+      RunTimeTicks: 14_400_000_000,
+      UserData: { PlaybackPositionTicks: 2_000_000_000, PlayedPercentage: 20 },
+      MediaSources: mediaSources,
+    });
+
+    expect(details).toMatchObject({
+      kind: 'series',
+      seriesId: 'empty-series',
+      playbackPositionTicks: 0,
+      progress: 0,
+      versions: [],
+    });
+  });
+
+  it.each([
+    { Type: 'Episode', LocationType: 'Virtual' },
+    { Type: 'Movie', LocationType: 'Offline' },
+    { Type: 'Episode', IsPlaceHolder: true },
+  ])('marks unavailable direct details as non-playable %#', (availability) => {
+    const details = showDetailsFromResult({
+      Id: 'unavailable-item',
+      Name: 'Unavailable',
+      MediaSources: mediaSources,
+      ...availability,
+    });
+
+    expect(details.playable).toBe(false);
+    expect(details.versions).toEqual([]);
+    expect(details.playbackPositionTicks).toBe(0);
+  });
+
   it('uses Jellyfin episode and season indexes instead of list positions', () => {
     const episodes = episodesFromResult({
       Items: [episode, { ...episode, Id: 'episode-2', ParentIndexNumber: 5, IndexNumber: 2 }],
@@ -479,70 +1386,6 @@ describe('native catalog events', () => {
     });
 
     await expect(pending).rejects.toThrow('invalid Jellyfin response');
-  });
-
-  it('queues, validates, and strips unknown fields from Up Next confirmations', () => {
-    const handlers = new Map<string, (message: unknown) => void>();
-    const bridge = new NativeBridge({
-      postMessage: vi.fn(),
-      onMessage: (name, handler) => handlers.set(name, handler),
-    });
-    handlers.get('playback.confirmation-required')?.({
-      itemId: 'episode-4',
-      source: 'up-next',
-      openInNewWindow: false,
-      accessToken: 'must-not-cross-the-bridge',
-      plan: {
-        playMethod: 'Transcode',
-        conversion: 'video',
-        requiresVideoTranscodeConfirmation: true,
-        transcodeReasons: ['VideoCodecNotSupported'],
-        mediaSourceId: 'source-4k',
-      },
-    });
-
-    const listener = vi.fn();
-    bridge.subscribePlaybackConfirmation(listener);
-    expect(listener).toHaveBeenCalledWith({
-      itemId: 'episode-4',
-      source: 'up-next',
-      openInNewWindow: false,
-      plan: {
-        playMethod: 'Transcode',
-        conversion: 'video',
-        requiresVideoTranscodeConfirmation: true,
-        transcodeReasons: ['VideoCodecNotSupported'],
-        mediaSourceId: 'source-4k',
-      },
-    });
-
-    handlers.get('playback.confirmation-required')?.({
-      itemId: 'episode-4',
-      source: 'up-next',
-      openInNewWindow: true,
-      plan: {
-        playMethod: 'Transcode',
-        conversion: 'video',
-        requiresVideoTranscodeConfirmation: true,
-        transcodeReasons: [],
-        mediaSourceId: 'source-4k',
-        url: 'https://example.invalid/video?ApiKey=secret',
-      },
-    });
-    expect(listener.mock.calls[1]?.[0]).toEqual({
-      itemId: 'episode-4',
-      source: 'up-next',
-      openInNewWindow: true,
-      plan: {
-        playMethod: 'Transcode',
-        conversion: 'video',
-        requiresVideoTranscodeConfirmation: true,
-        transcodeReasons: [],
-        mediaSourceId: 'source-4k',
-      },
-    });
-    handlers.get('playback.confirmation-required')?.({ itemId: '', source: 'up-next', plan: {} });
-    expect(listener).toHaveBeenCalledTimes(2);
   });
 });
 

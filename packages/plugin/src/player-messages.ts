@@ -11,6 +11,7 @@ export interface PlayerDisplayMetadata {
 
 export interface PlayerLaunch {
   nonce: string;
+  diagnosticCorrelation?: string;
   plan: PlaybackPlan;
   context: AuthenticatedApiContext;
   display: PlayerDisplayMetadata;

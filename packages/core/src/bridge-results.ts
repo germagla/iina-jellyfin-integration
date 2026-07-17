@@ -2,11 +2,15 @@ import { z } from 'zod';
 import type { BridgeOperation } from './contracts';
 import { PlayMethodSchema } from './contracts';
 import { BaseItemSchema, ItemsResultSchema, PublicSystemInfoSchema } from './jellyfin-schemas';
+import { isAbsoluteHttpUrl } from './portable-url';
 
 const identifier = z.string().trim().min(1).max(512);
+const absoluteHttpUrl = z.string().max(2_048).refine(isAbsoluteHttpUrl, {
+  message: 'Invalid URL',
+});
 const publicConnection = z
   .object({
-    serverUrl: z.string().url().max(2_048),
+    serverUrl: absoluteHttpUrl,
     serverId: identifier,
     serverName: z.string().min(1).max(256),
     userId: identifier,
@@ -32,7 +36,7 @@ const resultSchemas = {
   'connection.probe': z
     .object({
       server: PublicSystemInfoSchema,
-      normalizedUrl: z.string().url().max(2_048),
+      normalizedUrl: absoluteHttpUrl,
       transportPolicy: z.enum(['https', 'local-http-warning', 'remote-http-accepted']),
       isLocal: z.boolean(),
     })
@@ -66,12 +70,21 @@ const resultSchemas = {
         .regex(/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/),
     })
     .strict(),
-  'playback.start': z
-    .object({
-      status: z.enum(['started', 'confirmation-required']),
-      plan: PublicPlaybackPlanSchema,
-    })
-    .strict(),
+  'playback.start': z.discriminatedUnion('status', [
+    z
+      .object({
+        status: z.literal('started'),
+        plan: PublicPlaybackPlanSchema,
+      })
+      .strict(),
+    z
+      .object({
+        status: z.literal('confirmation-required'),
+        plan: PublicPlaybackPlanSchema,
+        confirmationId: identifier,
+      })
+      .strict(),
+  ]),
   'playback.stop': z.object({ stopped: z.literal(true) }).strict(),
   'catalog.refresh': z
     .object({

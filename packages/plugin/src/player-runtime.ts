@@ -1,10 +1,12 @@
 import {
   BaseItemSchema,
+  CATALOG_OPEN_REQUEST_PREFERENCE_KEY,
   PlaybackPlanSchema,
   beginPlaybackSession,
   buildPlaybackReportRequest,
   clampPositionTicks,
   createIdlePlaybackSession,
+  queryValueCaseInsensitive,
   reducePlaybackSession,
   secondsToTicks,
   shouldReportPeriodicProgress,
@@ -12,7 +14,7 @@ import {
   type PlaybackProgressEventName,
   type PlaybackSessionState,
 } from '@iina-jellyfin/core';
-import { DEFAULT_PROGRESS_INTERVAL_MS, PLAYER_MESSAGES, PLUGIN_PLAYBACK_SCHEME } from './constants';
+import { DEFAULT_PROGRESS_INTERVAL_MS, PLAYER_MESSAGES } from './constants';
 import type { IinaHttpTransport } from './iina-http';
 import type { PlayerLaunch } from './player-messages';
 import type { SafeLogger } from './safe-logger';
@@ -28,11 +30,6 @@ interface PlayerApi {
   sidebar: IINA.API.SidebarView;
   overlay: IINA.API.Overlay;
   utils: IINA.API.Utils;
-}
-
-interface LaunchResolver {
-  resolve: (launch: PlayerLaunch) => void;
-  reject: (error: Error) => void;
 }
 
 class StalePlayerLoadError extends Error {
@@ -55,17 +52,6 @@ interface UpNextState {
   autoplay: boolean;
 }
 
-function nonceFromPlaybackUrl(value: string): string | undefined {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== PLUGIN_PLAYBACK_SCHEME || parsed.hostname !== 'play') return undefined;
-    const nonce = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
-    return nonce.length > 0 ? nonce : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function safeHeaders(headers: Record<string, string>): string[] {
   const result: string[] = [];
   for (const [name, value] of Object.entries(headers)) {
@@ -80,16 +66,17 @@ function safeSubtitleExtension(codec: string | undefined): string {
   return normalized === 'ass' || normalized === 'ssa' || normalized === 'vtt' ? normalized : 'srt';
 }
 
+function safeTemporaryNameComponent(value: string): string {
+  const normalized = value.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 96);
+  return normalized.length > 0 ? normalized : 'playback';
+}
+
 function transcodeStartOffset(plan: PlayerLaunch['plan']): number {
   if (plan.playMethod === 'DirectPlay') return 0;
   try {
-    const url = new URL(plan.url);
-    for (const [name, value] of url.searchParams) {
-      if (name.toLowerCase() === 'starttimeticks') {
-        const parsed = Number(value);
-        return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
-      }
-    }
+    const value = queryValueCaseInsensitive(plan.url, 'StartTimeTicks');
+    const parsed = Number(value);
+    return value !== undefined && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
   } catch {
     // The plan schema already validates URLs. Falling back keeps reporting safe.
   }
@@ -97,10 +84,29 @@ function transcodeStartOffset(plan: PlayerLaunch['plan']): number {
   return 0;
 }
 
+function localStartPositionSeconds(plan: PlayerLaunch['plan']): number {
+  const serverStartOffset = transcodeStartOffset(plan);
+  return ticksToSeconds(Math.max(0, plan.startPositionTicks - serverStartOffset));
+}
+
+function mediaTitle(display: PlayerLaunch['display']): string {
+  if (
+    display.seriesName !== undefined &&
+    display.seasonNumber !== undefined &&
+    display.episodeNumber !== undefined
+  ) {
+    return `${display.seriesName} — S${String(display.seasonNumber).padStart(2, '0')}E${String(display.episodeNumber).padStart(2, '0')} — ${display.title}`;
+  }
+  return display.title;
+}
+
 export class PlayerRuntime {
   private session: PlaybackSessionState = createIdlePlaybackSession();
   private launch: PlayerLaunch | undefined;
-  private readonly resolvers = new Map<string, LaunchResolver>();
+  private readonly pendingLaunchesForHook: Array<{
+    launch: PlayerLaunch;
+    replacementSequence: number;
+  }> = [];
   private startedGeneration = -1;
   private positionBaseTicks = 0;
   private progressTimer: ReturnType<typeof setInterval> | undefined;
@@ -108,7 +114,6 @@ export class PlayerRuntime {
   private overlayReady = false;
   private upNext: UpNextState | undefined;
   private upNextTimer: ReturnType<typeof setInterval> | undefined;
-  private closedNotificationSent = false;
   private externalSubtitlePath: string | undefined;
   private reportQueue: Promise<void> = Promise.resolve();
   private controlQueue: Promise<void> = Promise.resolve();
@@ -116,6 +121,7 @@ export class PlayerRuntime {
   private replacementEndFilesToIgnore = 0;
   private pendingCoreStopAcknowledgement: (() => void) | undefined;
   private loadSequence = 0;
+  private activeLoadReplacementSequence: number | undefined;
 
   constructor(
     private readonly api: PlayerApi,
@@ -124,26 +130,19 @@ export class PlayerRuntime {
   ) {}
 
   install(): void {
-    this.api.global.onMessage(PLAYER_MESSAGES.plan, (raw) => this.receiveLaunch(raw));
-    this.api.global.onMessage(PLAYER_MESSAGES.replace, (raw) => {
-      const nonce = (raw as { nonce?: unknown }).nonce;
-      if (typeof nonce === 'string') {
-        const sequence = ++this.replacementSequence;
-        this.invalidatePendingLoads();
-        this.enqueueControl(() => this.replace(nonce, sequence));
-      }
-    });
+    this.api.global.onMessage(PLAYER_MESSAGES.launch, (raw) => this.receiveLaunch(raw));
     this.api.global.onMessage(PLAYER_MESSAGES.stop, (raw) => {
       const requested = (raw as { reason?: unknown }).reason;
       const reason = requested === 'closed' || requested === 'replaced' ? requested : 'user';
       this.replacementSequence += 1;
+      this.discardPendingHandoffs();
       this.invalidatePendingLoads();
       this.enqueueControl(() => this.stop(reason, false));
     });
     this.api.global.onMessage(PLAYER_MESSAGES.upNext, (raw) => this.receiveUpNext(raw));
 
-    this.api.mpv.addHook('on_load', 90, (next) => {
-      void this.resolveLoad(next);
+    this.api.mpv.addHook('on_load', 90, async (next) => {
+      await this.resolveLoad(next);
     });
 
     this.api.event.on('iina.window-loaded', () => this.loadPlayerViews());
@@ -154,8 +153,9 @@ export class PlayerRuntime {
       this.handleEndFile();
     });
     this.api.event.on('iina.window-will-close', () => {
-      if (this.progressTimer !== undefined) clearInterval(this.progressTimer);
+      this.clearProgressTimer();
       this.replacementSequence += 1;
+      this.discardPendingHandoffs();
       this.invalidatePendingLoads();
       this.enqueueControl(() => this.stop('closed', true));
     });
@@ -163,10 +163,7 @@ export class PlayerRuntime {
     this.api.sidebar.onMessage('host.action', (data) => this.handleViewAction(data, 'sidebar'));
     this.api.overlay.onMessage('host.action', (data) => this.handleViewAction(data, 'overlay'));
 
-    this.progressTimer = setInterval(
-      () => void this.periodicProgress(),
-      DEFAULT_PROGRESS_INTERVAL_MS,
-    );
+    this.ensureProgressTimer();
   }
 
   private receiveLaunch(raw: unknown): void {
@@ -187,39 +184,54 @@ export class PlayerRuntime {
       context: candidate.context,
       display: candidate.display,
     };
-    const resolver = this.resolvers.get(launch.nonce);
-    if (resolver !== undefined) {
-      this.resolvers.delete(launch.nonce);
-      resolver.resolve(launch);
+    if (
+      typeof candidate.diagnosticCorrelation === 'string' &&
+      candidate.diagnosticCorrelation.length <= 512
+    ) {
+      launch.diagnosticCorrelation = candidate.diagnosticCorrelation;
     }
-  }
-
-  private requestLaunch(nonce: string): Promise<PlayerLaunch> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.resolvers.delete(nonce);
-        reject(new Error('The Jellyfin playback plan timed out.'));
-      }, 12_000);
-      this.resolvers.set(nonce, {
-        resolve: (launch) => {
-          clearTimeout(timer);
-          resolve(launch);
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      });
-      this.api.global.postMessage(PLAYER_MESSAGES.planRequest, { nonce });
-    });
+    // IINA retains plugin-managed PlayerCore instances after their windows close.
+    // A later launch reuses the same main entry, so restart the timer stopped by
+    // window-will-close instead of assuming install() will run again.
+    this.ensureProgressTimer();
+    const sequence = ++this.replacementSequence;
+    this.invalidatePendingLoads();
+    this.enqueueControl(() => this.replace(launch, sequence));
   }
 
   private async resolveLoad(next?: () => void): Promise<void> {
     const original = this.api.mpv.getString('stream-open-filename');
-    const nonce = nonceFromPlaybackUrl(original);
-    if (nonce === undefined) {
+    if (original !== 'null://') {
+      const ownedLaunch = this.launch;
+      const ownedGeneration = this.session.generation;
+      this.replacementSequence += 1;
+      this.discardPendingHandoffs();
       this.invalidatePendingLoads();
-      await this.releaseForExternalLoad();
+      try {
+        if (ownedLaunch !== undefined) await this.releaseForExternalLoad();
+      } catch (error) {
+        this.logger.warn('Could not release Jellyfin playback for an external load', error);
+      } finally {
+        // Never let an unrelated URL inherit Jellyfin's HTTP headers, even if
+        // session reporting or another cleanup step failed.
+        if (ownedLaunch !== undefined) {
+          this.clearUpNext(true);
+          this.cleanupPlaybackIfOwned(ownedLaunch, ownedGeneration);
+        }
+        next?.();
+      }
+      return;
+    }
+
+    let pending: (typeof this.pendingLaunchesForHook)[number] | undefined;
+    while (this.pendingLaunchesForHook.length > 0) {
+      const candidate = this.pendingLaunchesForHook.shift();
+      if (candidate?.replacementSequence === this.replacementSequence) {
+        pending = candidate;
+        break;
+      }
+    }
+    if (pending === undefined) {
       next?.();
       return;
     }
@@ -227,13 +239,31 @@ export class PlayerRuntime {
     const loadSequence = this.beginLoad();
     this.deleteExternalSubtitle();
     try {
-      const launch = await this.requestLaunch(nonce);
-      if (loadSequence !== this.loadSequence) return;
+      const launch = pending.launch;
       this.launch = launch;
+      this.activeLoadReplacementSequence = pending.replacementSequence;
       this.session = beginPlaybackSession(this.session, launch.plan);
       const generation = this.session.generation;
+      this.logger.info('player.plan.received', {
+        correlation: launch.diagnosticCorrelation,
+        playMethod: launch.plan.playMethod,
+        conversion: launch.plan.conversion,
+        resume: launch.plan.startPositionTicks > 0,
+        externalSubtitle: launch.plan.externalSubtitle !== undefined,
+        selectedAudio: launch.plan.audioStreamIndex !== undefined,
+        selectedSubtitles: launch.plan.subtitleStreamIndex !== undefined,
+      });
       this.positionBaseTicks = transcodeStartOffset(launch.plan);
+      // IINA enables mpv's watch-later resume feature for ordinary playback. A
+      // saved position for this URL must never override Jellyfin's authoritative
+      // startPositionTicks (including an explicit zero for Play from Beginning).
+      // Keep these options file-local so the user's behavior for non-Jellyfin
+      // media is restored as soon as this managed load ends.
+      this.api.mpv.set('file-local-options/resume-playback', false);
+      this.api.mpv.set('file-local-options/save-position-on-quit', false);
+      this.api.mpv.set('file-local-options/start', localStartPositionSeconds(launch.plan));
       this.api.mpv.set('http-header-fields', safeHeaders(launch.plan.headers));
+      this.api.mpv.set('file-local-options/force-media-title', mediaTitle(launch.display));
       this.api.mpv.set('stream-open-filename', launch.plan.url);
       if (launch.plan.externalSubtitle !== undefined) {
         try {
@@ -252,25 +282,38 @@ export class PlayerRuntime {
           this.deleteExternalSubtitle();
         }
       }
+      this.logger.info('player.media.opening', {
+        correlation: launch.diagnosticCorrelation,
+        playMethod: launch.plan.playMethod,
+      });
       this.publishState();
     } catch (error) {
       if (error instanceof StalePlayerLoadError || loadSequence !== this.loadSequence) return;
       this.logger.error('Could not prepare Jellyfin playback', error);
       this.api.core.osd('Jellyfin playback could not be prepared.');
-      if (this.launch !== undefined) {
+      const failedLaunch = this.launch;
+      if (failedLaunch !== undefined) {
+        const generation = this.session.generation;
         this.session = reducePlaybackSession(this.session, {
           type: 'fail',
-          generation: this.session.generation,
+          generation,
           positionTicks: this.session.positionTicks,
           message: 'Jellyfin playback preparation failed.',
         });
-        await this.sendReport('stopped');
-        this.publishState();
+        const report = this.sendReport('stopped');
+        try {
+          this.publishState();
+          this.api.mpv.set('stream-open-filename', 'null://');
+        } finally {
+          this.cleanupPlaybackIfOwned(failedLaunch, generation);
+        }
+        await report;
+      } else {
+        this.clearMediaCredentials();
+        this.deleteExternalSubtitle();
+        this.scrubPlaybackSecrets();
+        this.api.mpv.set('stream-open-filename', 'null://');
       }
-      this.clearMediaCredentials();
-      this.deleteExternalSubtitle();
-      this.scrubPlaybackSecrets();
-      this.api.mpv.set('stream-open-filename', 'null://');
     } finally {
       next?.();
     }
@@ -284,16 +327,16 @@ export class PlayerRuntime {
     const subtitle = launch.plan.externalSubtitle;
     if (subtitle === undefined) return;
     const extension = safeSubtitleExtension(subtitle.codec);
-    const destination = `@tmp/jellyfin-subtitle-${generation}-${loadSequence}.${extension}`;
-    await this.transport.download(
-      {
-        method: 'GET',
-        url: subtitle.deliveryUrl,
-        headers: launch.plan.headers,
-      },
-      destination,
-    );
+    const destination = `@tmp/jellyfin-subtitle-${safeTemporaryNameComponent(launch.nonce)}-${generation}-${loadSequence}.${extension}`;
     try {
+      await this.transport.download(
+        {
+          method: 'GET',
+          url: subtitle.deliveryUrl,
+          headers: launch.plan.headers,
+        },
+        destination,
+      );
       const handle = this.api.file.handle(destination, 'read');
       try {
         handle.seekToEnd();
@@ -319,22 +362,41 @@ export class PlayerRuntime {
 
   private async mediaLoaded(): Promise<void> {
     if (this.launch === undefined || this.session.status !== 'preparing') return;
+    if (
+      this.activeLoadReplacementSequence !== undefined &&
+      this.activeLoadReplacementSequence !== this.replacementSequence
+    ) {
+      return;
+    }
     const generation = this.session.generation;
     this.clearUpNext(true);
-    const shouldSeekLocally =
-      this.positionBaseTicks === 0 && this.launch.plan.startPositionTicks > 0;
-    if (shouldSeekLocally) {
-      this.api.core.seekTo(ticksToSeconds(this.launch.plan.startPositionTicks));
+    const requestedLocalStartSeconds = localStartPositionSeconds(this.launch.plan);
+    const loadedLocalPositionSeconds = this.api.mpv.getNumber('time-pos');
+    const shouldCorrectLoadedPosition =
+      !Number.isFinite(loadedLocalPositionSeconds) ||
+      Math.abs(loadedLocalPositionSeconds - requestedLocalStartSeconds) > 1;
+    if (shouldCorrectLoadedPosition) {
+      this.api.core.seekTo(requestedLocalStartSeconds);
+      this.logger.info('player.position.corrected', {
+        correlation: this.launch.diagnosticCorrelation,
+        resumed: this.launch.plan.startPositionTicks > 0,
+      });
     }
     this.applySelectedTracks();
     this.loadExternalSubtitleTrack();
     this.session = reducePlaybackSession(this.session, {
       type: 'media-started',
       generation,
-      positionTicks: shouldSeekLocally
-        ? Math.max(this.launch.plan.startPositionTicks, this.readPositionTicks())
-        : this.readPositionTicks(),
+      // The initial mpv position can still describe stale watch-later state and
+      // seekTo is asynchronous. Jellyfin's requested start is authoritative for
+      // the start report; later progress reports use mpv's live position.
+      positionTicks: this.launch.plan.startPositionTicks,
       durationTicks: this.readDurationTicks(),
+    });
+    this.logger.info('player.media.loaded', {
+      correlation: this.launch.diagnosticCorrelation,
+      playMethod: this.launch.plan.playMethod,
+      resumed: this.launch.plan.startPositionTicks > 0,
     });
     if (this.startedGeneration !== generation) {
       this.startedGeneration = generation;
@@ -511,6 +573,7 @@ export class PlayerRuntime {
     ) {
       return;
     }
+    const launch = this.launch;
     this.updatePosition();
     const generation = this.session.generation;
     if (this.session.status === 'preparing') {
@@ -520,11 +583,13 @@ export class PlayerRuntime {
         positionTicks: this.session.positionTicks,
         message: 'The Jellyfin media ended before IINA could load it.',
       });
-      await this.sendReport('stopped');
-      this.publishState();
-      this.clearMediaCredentials();
-      this.deleteExternalSubtitle();
-      this.scrubPlaybackSecrets();
+      const report = this.sendReport('stopped');
+      try {
+        this.publishState();
+      } finally {
+        this.cleanupPlaybackIfOwned(launch, generation);
+      }
+      await report;
       return;
     }
     const duration = this.session.durationTicks;
@@ -544,73 +609,97 @@ export class PlayerRuntime {
           positionTicks: this.session.positionTicks,
           reason: 'user',
         });
-    await this.sendReport('stopped');
-    this.publishState();
-    this.clearMediaCredentials();
-    this.deleteExternalSubtitle();
-    this.scrubPlaybackSecrets();
+    this.logger.info('player.media.ended', {
+      correlation: this.launch.diagnosticCorrelation,
+      completed,
+    });
+    const report = this.sendReport('stopped');
+    try {
+      this.publishState();
+    } finally {
+      // Queue the immutable report first, then remove the old plan and credentials
+      // synchronously. A newer launch can no longer be scrubbed when the network
+      // request settles later.
+      this.cleanupPlaybackIfOwned(launch, generation);
+    }
+    await report;
   }
 
   private async stop(reason: 'closed' | 'replaced' | 'user', closing: boolean): Promise<void> {
-    if (closing && !this.closedNotificationSent) {
-      this.closedNotificationSent = true;
-      this.api.global.postMessage(PLAYER_MESSAGES.closed, {
-        generation: this.session.generation,
-      });
-    }
+    this.discardPendingHandoffs();
     if (this.launch === undefined) {
       this.clearMediaCredentials();
       this.deleteExternalSubtitle();
       if (!closing) await this.stopCoreAndWaitForEnd();
       return;
     }
+    const launch = this.launch;
     this.updatePosition();
     const generation = this.session.generation;
     const wasActive =
       this.session.status === 'preparing' ||
       this.session.status === 'playing' ||
       this.session.status === 'paused';
+    this.logger.info('player.stop.requested', {
+      correlation: this.launch.diagnosticCorrelation,
+      reason,
+      closing,
+      wasActive,
+    });
     this.session = reducePlaybackSession(this.session, {
       type: 'stop',
       generation,
       positionTicks: this.session.positionTicks,
       reason,
     });
-    this.publishState();
     let endAcknowledgement: Promise<void> | undefined;
     if (!closing) {
       endAcknowledgement = this.stopCoreAndWaitForEnd();
     }
-    if (wasActive) await this.sendReport('stopped');
+    const report = wasActive ? this.sendReport('stopped') : undefined;
+    try {
+      this.publishState();
+    } finally {
+      this.cleanupPlaybackIfOwned(launch, generation);
+    }
+    if (report !== undefined) await report;
     if (endAcknowledgement !== undefined) await endAcknowledgement;
-    this.clearMediaCredentials();
-    this.deleteExternalSubtitle();
-    this.scrubPlaybackSecrets();
   }
 
-  private async releaseForExternalLoad(): Promise<void> {
-    if (this.launch !== undefined) {
-      this.updatePosition();
-      const generation = this.session.generation;
-      const wasActive =
-        this.session.status === 'preparing' ||
-        this.session.status === 'playing' ||
-        this.session.status === 'paused';
-      if (wasActive) {
-        this.session = reducePlaybackSession(this.session, {
-          type: 'stop',
-          generation,
-          positionTicks: this.session.positionTicks,
-          reason: 'replaced',
-        });
-        await this.sendReport('stopped');
-        this.publishState();
+  private releaseForExternalLoad(): Promise<void> {
+    const launch = this.launch;
+    const generation = this.session.generation;
+    let report: Promise<void> | undefined;
+    try {
+      if (launch !== undefined) {
+        this.updatePosition();
+        const wasActive =
+          this.session.status === 'preparing' ||
+          this.session.status === 'playing' ||
+          this.session.status === 'paused';
+        if (wasActive) {
+          this.session = reducePlaybackSession(this.session, {
+            type: 'stop',
+            generation,
+            positionTicks: this.session.positionTicks,
+            reason: 'replaced',
+          });
+          report = this.sendReport('stopped');
+          this.publishState();
+        }
       }
+    } finally {
+      this.clearUpNext(true);
+      if (launch !== undefined) this.cleanupPlaybackIfOwned(launch, generation);
     }
-    this.clearUpNext(true);
-    this.clearMediaCredentials();
-    this.deleteExternalSubtitle();
-    this.scrubPlaybackSecrets();
+    if (report !== undefined) {
+      void report.catch((error) => {
+        this.logger.warn('Jellyfin playback stopped report failed during an external load', error);
+      });
+    }
+    // Reporting remains serialized in reportQueue, but an unrelated local load
+    // must not wait for a network round trip before its on_load hook can continue.
+    return Promise.resolve();
   }
 
   private clearMediaCredentials(): void {
@@ -673,9 +762,34 @@ export class PlayerRuntime {
 
   private invalidatePendingLoads(): void {
     this.loadSequence += 1;
-    const error = new StalePlayerLoadError();
-    for (const resolver of this.resolvers.values()) resolver.reject(error);
-    this.resolvers.clear();
+  }
+
+  private discardPendingHandoffs(): void {
+    this.pendingLaunchesForHook.length = 0;
+  }
+
+  private ensureProgressTimer(): void {
+    if (this.progressTimer !== undefined) return;
+    this.progressTimer = setInterval(
+      () => void this.periodicProgress(),
+      DEFAULT_PROGRESS_INTERVAL_MS,
+    );
+  }
+
+  private clearProgressTimer(): void {
+    if (this.progressTimer === undefined) return;
+    clearInterval(this.progressTimer);
+    this.progressTimer = undefined;
+  }
+
+  private cleanupPlaybackIfOwned(launch: PlayerLaunch, generation: number): void {
+    if (this.launch !== launch || this.session.generation !== generation) return;
+    try {
+      this.clearMediaCredentials();
+    } finally {
+      this.deleteExternalSubtitle();
+      this.scrubPlaybackSecrets();
+    }
   }
 
   private scrubPlaybackSecrets(): void {
@@ -693,24 +807,44 @@ export class PlayerRuntime {
     if (current.errorMessage !== undefined) scrubbed.errorMessage = current.errorMessage;
     this.session = scrubbed;
     this.launch = undefined;
+    this.activeLoadReplacementSequence = undefined;
   }
 
-  private async replace(nonce: string, sequence: number): Promise<void> {
+  private async replace(launch: PlayerLaunch, sequence: number): Promise<void> {
     if (sequence !== this.replacementSequence) return;
     this.clearUpNext(true);
+    const coreWasIdle = this.api.core.status.idle;
     const hadActiveMedia = this.retireForReplacement();
     if (sequence !== this.replacementSequence) return;
-    if (hadActiveMedia) this.replacementEndFilesToIgnore += 1;
+    const replaceInsideMpv = hadActiveMedia || !coreWasIdle;
+    if (replaceInsideMpv) this.replacementEndFilesToIgnore += 1;
+    const pending = { launch, replacementSequence: sequence };
+    this.pendingLaunchesForHook.push(pending);
     try {
-      this.api.core.open(`${PLUGIN_PLAYBACK_SCHEME}//play/${encodeURIComponent(nonce)}`);
+      // IINA logs URLs passed to core.open. Open mpv's local null protocol and replace
+      // stream-open-filename from the on_load hook so authenticated media URLs never
+      // enter IINA's Open URL/authentication flow or its core-open diagnostics.
+      if (replaceInsideMpv) {
+        // PlayerCore.open closes an already-visible network player in IINA 1.4.4.
+        // Replacing from mpv keeps the managed window alive while preserving the
+        // same authenticated on_load handoff used for an initial/reopened core.
+        this.api.mpv.command('loadfile', ['null://', 'replace']);
+      } else {
+        // A stopped/closed controlled core is idle, so the IINA API is required
+        // here to reopen its native player window.
+        this.api.core.open('null://');
+      }
     } catch (error) {
-      if (hadActiveMedia) this.replacementEndFilesToIgnore -= 1;
+      const pendingIndex = this.pendingLaunchesForHook.indexOf(pending);
+      if (pendingIndex >= 0) this.pendingLaunchesForHook.splice(pendingIndex, 1);
+      if (replaceInsideMpv) this.replacementEndFilesToIgnore -= 1;
       throw error;
     }
   }
 
   private retireForReplacement(): boolean {
-    if (this.launch === undefined) {
+    const launch = this.launch;
+    if (launch === undefined) {
       this.clearMediaCredentials();
       this.deleteExternalSubtitle();
       return false;
@@ -727,11 +861,17 @@ export class PlayerRuntime {
       positionTicks: this.session.positionTicks,
       reason: 'replaced',
     });
-    this.publishState();
-    if (wasActive) void this.sendReport('stopped');
-    this.clearMediaCredentials();
-    this.deleteExternalSubtitle();
-    this.scrubPlaybackSecrets();
+    const report = wasActive ? this.sendReport('stopped') : undefined;
+    try {
+      this.publishState();
+    } finally {
+      this.cleanupPlaybackIfOwned(launch, generation);
+    }
+    if (report !== undefined) {
+      void report.catch((error) => {
+        this.logger.warn('Jellyfin playback stopped report failed during replacement', error);
+      });
+    }
     return wasActive;
   }
 
@@ -750,7 +890,6 @@ export class PlayerRuntime {
       itemId: this.launch?.plan.itemId,
       stopReason: this.session.stopReason,
     };
-    this.api.global.postMessage(PLAYER_MESSAGES.state, state);
     if (this.sidebarReady) this.api.sidebar.postMessage('player.state', state);
     if (this.overlayReady) this.api.overlay.postMessage('player.state', state);
   }
@@ -830,7 +969,8 @@ export class PlayerRuntime {
       this.publishState();
       this.publishUpNext();
     } else if (action === 'window.openCatalog') {
-      this.api.global.postMessage(PLAYER_MESSAGES.catalogOpen, {});
+      this.api.preferences.set(CATALOG_OPEN_REQUEST_PREFERENCE_KEY, Date.now());
+      this.api.preferences.sync();
     } else if (action === 'settings.autoplay') {
       const enabled = (raw as { enabled?: unknown }).enabled;
       if (typeof enabled === 'boolean') {
@@ -858,4 +998,4 @@ export class PlayerRuntime {
   }
 }
 
-export { nonceFromPlaybackUrl, safeHeaders, safeSubtitleExtension, transcodeStartOffset };
+export { localStartPositionSeconds, safeHeaders, safeSubtitleExtension, transcodeStartOffset };

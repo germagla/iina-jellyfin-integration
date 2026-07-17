@@ -21,6 +21,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body,
 #root {
@@ -100,6 +104,13 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: 10px;
+  max-width: min(72vw, 1080px);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.primary-navigation::-webkit-scrollbar {
+  display: none;
 }
 
 .nav-item,
@@ -116,6 +127,7 @@ select:focus-visible {
 
 .nav-item {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 9px;
   min-height: 40px;
@@ -217,20 +229,32 @@ select:focus-visible {
   letter-spacing: -0.015em;
 }
 
-.section-heading span {
+.section-heading span,
+.shelf-toggle {
   color: var(--faint);
   font-size: 13px;
 }
 
+.shelf-toggle {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  background: transparent;
+}
+
+.shelf-toggle:hover,
+.shelf-toggle:focus-visible {
+  color: #fff;
+  background: var(--surface);
+}
+
 .media-shelf {
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(170px, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(min(170px, 100%), 1fr));
   gap: 18px;
-  overflow-x: auto;
-  padding: 3px 3px 16px;
-  margin: -3px;
-  scrollbar-width: thin;
+  overflow: visible;
 }
 
 .media-card {
@@ -374,8 +398,42 @@ select:focus-visible {
 
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
+  grid-template-columns: repeat(var(--catalog-columns, auto-fill), minmax(145px, 1fr));
   gap: 28px 20px;
+}
+
+.catalog-grid-region {
+  min-width: 0;
+}
+
+.catalog-refresh-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  margin-top: 10px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.catalog-refresh-status--error {
+  color: #ff8079;
+}
+
+.catalog-refresh-status button {
+  padding: 2px 7px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  color: inherit;
+  background: var(--surface);
+  font: inherit;
+}
+
+.catalog-refresh-status button:hover,
+.catalog-refresh-status button:focus-visible {
+  color: #fff;
+  background: var(--surface-hover);
 }
 
 .pagination {
@@ -447,7 +505,7 @@ select:focus-visible {
 .details-screen {
   position: relative;
   min-height: 100vh;
-  overflow: hidden;
+  overflow-x: hidden;
   isolation: isolate;
   background: #11171d;
 }
@@ -738,12 +796,21 @@ select:focus-visible {
   color: var(--danger);
 }
 
+.playback-unavailable {
+  padding: 14px 16px;
+  margin: 4px 0 0;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.64);
+  background: rgba(15, 18, 22, 0.58);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
 .episode-section {
-  position: absolute;
+  position: relative;
   z-index: 3;
-  right: clamp(30px, 4.4vw, 65px);
-  bottom: 30px;
-  left: clamp(30px, 4.4vw, 65px);
+  margin: 42px clamp(30px, 4.4vw, 65px) 30px;
 }
 
 .season-select {
@@ -1072,6 +1139,23 @@ select:focus-visible {
   line-height: 1.4;
 }
 
+.catalog-global-error {
+  position: fixed;
+  z-index: 30;
+  top: 20px;
+  left: 50%;
+  max-width: min(560px, calc(100vw - 48px));
+  margin: 0;
+  padding: 10px 14px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 119, 108, 0.48);
+  border-radius: 10px;
+  background: rgba(48, 24, 25, 0.96);
+  color: var(--danger);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.38);
+  font-size: 0.875rem;
+}
+
 .lan-http-note {
   display: flex;
   align-items: flex-start;
@@ -1189,17 +1273,11 @@ select:focus-visible {
 @media (max-height: 920px), (max-width: 980px) {
   .details-screen {
     min-height: 980px;
-    overflow: auto;
+    overflow-x: hidden;
   }
 
   .details-content {
     padding-top: 130px;
-  }
-
-  .episode-section {
-    position: relative;
-    inset: auto;
-    margin: 42px clamp(30px, 4.4vw, 65px) 30px;
   }
 }
 
@@ -1210,16 +1288,12 @@ select:focus-visible {
   }
 
   .primary-navigation {
-    justify-content: center;
+    max-width: calc(100vw - 112px);
     gap: 1px;
   }
 
   .nav-item {
     padding: 0 10px;
-  }
-
-  .nav-item span {
-    display: none;
   }
 
   .details-screen__wash {
@@ -1228,10 +1302,6 @@ select:focus-visible {
 
   .episode-strip {
     grid-template-columns: repeat(2, minmax(170px, 1fr));
-  }
-
-  .media-shelf {
-    grid-auto-columns: minmax(160px, 42vw);
   }
 }
 

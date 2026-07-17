@@ -11,6 +11,7 @@ import {
   buildQuickConnectAuthenticationRequest,
   buildQuickConnectInitiateRequest,
   buildQuickConnectStatusRequest,
+  buildSessionLogoutRequest,
   normalizeServerUrl,
   selectPlaybackPlan,
   type AuthenticatedApiContext,
@@ -156,6 +157,10 @@ export class JellyfinClient {
       },
       accessToken: authentication.AccessToken,
     };
+  }
+
+  async reportSessionEnded(context: AuthenticatedApiContext): Promise<void> {
+    await this.transport.execute(buildSessionLogoutRequest(context));
   }
 
   async queryCatalog(request: CatalogRequest, context: AuthenticatedApiContext): Promise<unknown> {

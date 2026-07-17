@@ -1,2 +1,3 @@
-dist/** -diff
+# Production plugin bundles are committed for IINA's GitHub installer but generated.
+dist/** -diff linguist-generated=true
 *.iinaplgz binary

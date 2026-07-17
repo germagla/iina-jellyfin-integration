@@ -21,19 +21,18 @@ const nextEpisode: UpNextViewState = {
 };
 
 describe('contextual player surfaces', () => {
-  it('uses the runtime host protocol for playback, cancellation, and autoplay', async () => {
+  it('keeps unsupported Up Next controls out of the production sidebar', async () => {
     const host = new MockPlayerUiHost({ upNext: nextEpisode });
     const user = userEvent.setup();
     render(<SidebarApp host={host} />);
 
-    expect(screen.getByLabelText('9 seconds remaining')).toBeInTheDocument();
+    expect(screen.queryByText('Up Next')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Pause playback' }));
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.getByRole('heading', { name: 'Autoplay cancelled' })).toBeInTheDocument();
 
-    expect(host.messages.map((message) => message.action)).toEqual(
-      expect.arrayContaining(['player.pause', 'upNext.cancel']),
-    );
+    expect(host.messages.map((message) => message.action)).toContain('player.pause');
+    expect(host.messages.some((message) => message.action.startsWith('upNext.'))).toBe(false);
   });
 
   it('renders host-driven countdown updates and sends play-now from the overlay', async () => {

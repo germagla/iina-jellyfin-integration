@@ -1,3 +1,5 @@
+import { parseAbsoluteUrl, resolveAbsoluteUrl, type PortableUrl } from './portable-url';
+
 export type HttpTransportPolicy = 'https' | 'local-http-warning' | 'remote-http-accepted';
 
 export interface NormalizedServerAddress {
@@ -73,15 +75,25 @@ export function isLocalHostname(hostname: string): boolean {
   );
 }
 
-function parseUserSuppliedUrl(input: string): URL {
+function parseUserSuppliedUrl(input: string): PortableUrl {
   const trimmed = input.trim();
   if (trimmed.length === 0) {
     throw new ServerUrlError('EMPTY_URL', 'Enter a Jellyfin server URL');
   }
 
-  const withScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let withScheme = trimmed;
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(trimmed)) {
+    const localCandidate = `http://${trimmed}`;
+    try {
+      withScheme = isLocalHostname(parseAbsoluteUrl(localCandidate).hostname)
+        ? localCandidate
+        : `https://${trimmed}`;
+    } catch {
+      withScheme = `https://${trimmed}`;
+    }
+  }
   try {
-    return new URL(withScheme);
+    return parseAbsoluteUrl(withScheme);
   } catch {
     throw new ServerUrlError('INVALID_URL', 'The Jellyfin server URL is not valid');
   }
@@ -92,16 +104,16 @@ export function normalizeServerUrl(
   options: { allowInsecureRemote?: boolean } = {},
 ): NormalizedServerAddress {
   const parsed = parseUserSuppliedUrl(input);
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+  if (parsed.scheme !== 'http' && parsed.scheme !== 'https') {
     throw new ServerUrlError('UNSUPPORTED_PROTOCOL', 'Jellyfin servers must use HTTP or HTTPS');
   }
-  if (parsed.username !== '' || parsed.password !== '') {
+  if (parsed.userinfo !== undefined) {
     throw new ServerUrlError(
       'URL_CREDENTIALS_NOT_ALLOWED',
       'Do not put credentials in the server URL',
     );
   }
-  if (parsed.search !== '' || parsed.hash !== '') {
+  if (parsed.query !== undefined || parsed.fragment !== undefined) {
     throw new ServerUrlError(
       'URL_QUERY_NOT_ALLOWED',
       'The server URL cannot contain a query or fragment',
@@ -109,7 +121,7 @@ export function normalizeServerUrl(
   }
 
   const local = isLocalHostname(parsed.hostname);
-  if (parsed.protocol === 'http:' && !local && options.allowInsecureRemote !== true) {
+  if (parsed.scheme === 'http' && !local && options.allowInsecureRemote !== true) {
     throw new ServerUrlError(
       'INSECURE_REMOTE_SERVER',
       'Remote Jellyfin servers must use HTTPS unless insecure access is explicitly accepted',
@@ -120,7 +132,7 @@ export function normalizeServerUrl(
   const origin = parsed.origin;
   const url = `${origin}${path}`;
   const policy: HttpTransportPolicy =
-    parsed.protocol === 'https:' ? 'https' : local ? 'local-http-warning' : 'remote-http-accepted';
+    parsed.scheme === 'https' ? 'https' : local ? 'local-http-warning' : 'remote-http-accepted';
 
   return {
     url,
@@ -138,19 +150,42 @@ export function joinJellyfinPath(baseUrl: string, apiPath: string): string {
   return suffix.length === 0 ? normalized.url : `${normalized.url}/${suffix}`;
 }
 
+function hasAmbiguousPathEncoding(pathname: string): boolean {
+  let decoded = pathname;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (
+      decoded.includes('\\') ||
+      decoded.split('/').some((part) => part === '.' || part === '..')
+    ) {
+      return true;
+    }
+    let next: string;
+    try {
+      next = decodeURIComponent(decoded);
+    } catch {
+      return true;
+    }
+    if (next === decoded) return false;
+    decoded = next;
+  }
+  // Excessively nested escaping is not needed by Jellyfin media endpoints and
+  // can be interpreted differently by layered reverse proxies.
+  return true;
+}
+
 export function resolveJellyfinUrl(baseUrl: string, returnedUrl: string): string {
   const value = returnedUrl.trim();
   const server = normalizeServerUrl(baseUrl, { allowInsecureRemote: true });
-  let resolved: URL;
+  let resolved: PortableUrl;
   try {
     if (/^https?:\/\//i.test(value) || value.startsWith('//')) {
-      resolved = new URL(value, server.origin);
+      resolved = resolveAbsoluteUrl(server.origin, value);
     } else {
       // Jellyfin commonly returns root-looking paths such as /Videos/..., but
       // they are relative to its configured reverse-proxy base path. Resolving
       // after removing leading slashes preserves that behavior while allowing
       // URL normalization to expose and reject dot-segment escapes.
-      resolved = new URL(value.replace(/^\/+/, ''), `${server.url}/`);
+      resolved = resolveAbsoluteUrl(`${server.url}/`, value.replace(/^\/+/, ''));
     }
   } catch {
     throw new ServerUrlError('INVALID_URL', 'Jellyfin returned an invalid media URL');
@@ -161,15 +196,15 @@ export function resolveJellyfinUrl(baseUrl: string, returnedUrl: string): string
     resolved.pathname === server.basePath ||
     resolved.pathname.startsWith(`${server.basePath}/`);
   if (
-    resolved.username !== '' ||
-    resolved.password !== '' ||
+    resolved.userinfo !== undefined ||
     resolved.origin !== server.origin ||
-    !withinBasePath
+    !withinBasePath ||
+    hasAmbiguousPathEncoding(resolved.pathname)
   ) {
     throw new ServerUrlError(
       'INVALID_URL',
       'Jellyfin returned a media URL outside the configured server address',
     );
   }
-  return resolved.toString();
+  return resolved.href;
 }

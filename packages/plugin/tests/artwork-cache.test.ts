@@ -8,7 +8,11 @@ function createFileApi() {
   const binary = new Map<string, Uint8Array>();
   const file: IinaFileApi = {
     exists: (path) => text.has(path) || binary.has(path),
-    read: (path) => text.get(path),
+    read: (path) => {
+      const value = text.get(path);
+      if (value === undefined) throw new Error(`Cannot read missing file: ${path}`);
+      return value;
+    },
     write: (path, value) => text.set(path, value),
     delete: (path) => {
       text.delete(path);
@@ -42,6 +46,38 @@ const request = {
 const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0x01]);
 
 describe('ArtworkCache', () => {
+  it('initializes with an empty cache when the index does not exist on first run', () => {
+    const { file } = createFileApi();
+
+    expect(
+      () => new ArtworkCache(file, { download: vi.fn() } as unknown as IinaHttpTransport),
+    ).not.toThrow();
+  });
+
+  it('initializes with an empty cache when an existing index cannot be read', () => {
+    const { file, text } = createFileApi();
+    text.set('@data/artwork-index.json', '{}');
+    file.read = () => {
+      throw new Error('The artwork index could not be opened');
+    };
+
+    expect(
+      () => new ArtworkCache(file, { download: vi.fn() } as unknown as IinaHttpTransport),
+    ).not.toThrow();
+  });
+
+  it('replaces a corrupted index after the next successful download', async () => {
+    const { file, text, binary } = createFileApi();
+    text.set('@data/artwork-index.json', '{not valid json');
+    const download = vi.fn(async (_request: unknown, destination: string) => {
+      binary.set(destination, jpeg);
+    });
+    const cache = new ArtworkCache(file, { download } as unknown as IinaHttpTransport);
+
+    await expect(cache.fetchDataUrl(request, context)).resolves.toContain('data:image/jpeg');
+    expect(() => JSON.parse(text.get('@data/artwork-index.json') ?? '')).not.toThrow();
+  });
+
   it('returns opaque data URLs and reuses private cache files', async () => {
     const { file, binary } = createFileApi();
     const download = vi.fn(async (_request: unknown, destination: string) => {

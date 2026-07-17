@@ -1,8 +1,4 @@
-import {
-  BridgeResponseSchema,
-  PublicPlaybackPlanSchema,
-  parseBridgeResult,
-} from '@iina-jellyfin/core';
+import { BridgeResponseSchema, parseBridgeResult } from '@iina-jellyfin/core';
 import { demoHome, demoMovies, demoShowDetails, demoShows } from '../demo/catalog';
 import type {
   BridgeOperation,
@@ -14,7 +10,6 @@ import type {
   CatalogRequest,
   EpisodeDetails,
   MediaCard,
-  PlaybackConfirmationNotice,
   PublicConnection,
 } from './contracts';
 
@@ -46,73 +41,19 @@ function parseResponse(value: unknown): BridgeResponse | undefined {
   return parsed.success ? (parsed.data as BridgeResponse) : undefined;
 }
 
-function parsePlaybackConfirmationNotice(value: unknown): PlaybackConfirmationNotice | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-  const candidate = value as Partial<PlaybackConfirmationNotice>;
-  if (
-    typeof candidate.itemId !== 'string' ||
-    candidate.itemId.length === 0 ||
-    candidate.itemId.length > 256 ||
-    candidate.source !== 'up-next' ||
-    typeof candidate.openInNewWindow !== 'boolean' ||
-    typeof candidate.plan !== 'object' ||
-    candidate.plan === null
-  ) {
-    return undefined;
-  }
-  const plan = PublicPlaybackPlanSchema.safeParse(candidate.plan);
-  if (!plan.success || !plan.data.requiresVideoTranscodeConfirmation) return undefined;
-
-  return {
-    itemId: candidate.itemId,
-    source: 'up-next',
-    openInNewWindow: candidate.openInNewWindow,
-    plan: {
-      playMethod: plan.data.playMethod,
-      conversion: plan.data.conversion,
-      requiresVideoTranscodeConfirmation: true,
-      transcodeReasons: [...plan.data.transcodeReasons],
-      mediaSourceId: plan.data.mediaSourceId,
-      ...(plan.data.audioStreamIndex === undefined
-        ? {}
-        : { audioStreamIndex: plan.data.audioStreamIndex }),
-      ...(plan.data.subtitleStreamIndex === undefined
-        ? {}
-        : { subtitleStreamIndex: plan.data.subtitleStreamIndex }),
-    },
-  };
-}
-
 export class NativeBridge implements CatalogBridge {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly invalidationListeners = new Set<() => void>();
-  private readonly confirmationListeners = new Set<(notice: PlaybackConfirmationNotice) => void>();
-  private queuedConfirmation?: PlaybackConfirmationNotice;
 
   constructor(private readonly native: IinaWebviewBridge) {
     native.onMessage('bridge.response', (message) => this.handleResponse(message));
     native.onMessage('catalog.invalidated', () => this.notifyInvalidated());
     native.onMessage('catalog.visible', () => this.notifyInvalidated());
-    native.onMessage('playback.confirmation-required', (message) =>
-      this.handlePlaybackConfirmation(message),
-    );
   }
 
   subscribeInvalidation(listener: () => void): () => void {
     this.invalidationListeners.add(listener);
     return () => this.invalidationListeners.delete(listener);
-  }
-
-  subscribePlaybackConfirmation(
-    listener: (notice: PlaybackConfirmationNotice) => void,
-  ): () => void {
-    this.confirmationListeners.add(listener);
-    if (this.queuedConfirmation) {
-      const notice = this.queuedConfirmation;
-      this.queuedConfirmation = undefined;
-      listener(notice);
-    }
-    return () => this.confirmationListeners.delete(listener);
   }
 
   request<K extends BridgeOperation>(
@@ -160,16 +101,6 @@ export class NativeBridge implements CatalogBridge {
   private notifyInvalidated(): void {
     for (const listener of this.invalidationListeners) listener();
   }
-
-  private handlePlaybackConfirmation(message: unknown): void {
-    const notice = parsePlaybackConfirmationNotice(message);
-    if (!notice) return;
-    if (this.confirmationListeners.size === 0) {
-      this.queuedConfirmation = notice;
-      return;
-    }
-    for (const listener of this.confirmationListeners) listener(notice);
-  }
 }
 
 const demoConnection: PublicConnection = {
@@ -184,7 +115,6 @@ const demoConnection: PublicConnection = {
 
 export class MockBridge implements CatalogBridge {
   readonly requests: BridgeRequest[] = [];
-  private readonly confirmationListeners = new Set<(notice: PlaybackConfirmationNotice) => void>();
 
   constructor(
     private connected = true,
@@ -202,17 +132,6 @@ export class MockBridge implements CatalogBridge {
     if (override instanceof Error) throw override;
     if (override !== undefined) return override as BridgeResultMap[K];
     return this.handle(operation, payload) as BridgeResultMap[K];
-  }
-
-  subscribePlaybackConfirmation(
-    listener: (notice: PlaybackConfirmationNotice) => void,
-  ): () => void {
-    this.confirmationListeners.add(listener);
-    return () => this.confirmationListeners.delete(listener);
-  }
-
-  emitPlaybackConfirmation(notice: PlaybackConfirmationNotice): void {
-    for (const listener of this.confirmationListeners) listener(notice);
   }
 
   private handle<K extends BridgeOperation>(
@@ -256,10 +175,10 @@ export class MockBridge implements CatalogBridge {
         const requiresVideoTranscode = request.mediaSourceId === 'source-4k';
         const approved =
           !requiresVideoTranscode ||
-          request.videoTranscodeApproved ||
-          request.itemId === 'horizons-episode-4';
+          request.videoTranscodeConfirmationId === 'demo-transcode-confirmation';
         return {
           status: approved ? 'started' : 'confirmation-required',
+          ...(!approved ? { confirmationId: 'demo-transcode-confirmation' } : {}),
           plan: {
             playMethod: approved ? 'DirectPlay' : 'Transcode',
             conversion: approved ? 'none' : 'video',
@@ -319,7 +238,24 @@ function mockCatalog(request: CatalogRequest): unknown {
     );
   }
   if (request.kind === 'libraries') {
-    return mockItemsResult([], 0, 0);
+    return {
+      Items: [
+        {
+          Id: 'library-movies',
+          Name: 'Movies',
+          Type: 'CollectionFolder',
+          CollectionType: 'movies',
+        },
+        {
+          Id: 'library-shows',
+          Name: 'Shows',
+          Type: 'CollectionFolder',
+          CollectionType: 'tvshows',
+        },
+      ],
+      TotalRecordCount: 2,
+      StartIndex: 0,
+    };
   }
 
   const source = request.itemType === 'Movie' ? demoMovies : demoShows;

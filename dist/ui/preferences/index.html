@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'sha256-zrNLx7D/wGa/pyMq/3H38/iSaf8jXnKTA8LwEuIvecQ='; style-src 'sha256-8lWzoNMJbIqWNhr+kg0NlkVsN7PPI8QRJ/q+dafe8PA='; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Jellyfin for IINA Preferences</title>
+    
+    <style>:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,SF Pro Text,Helvetica Neue,sans-serif;font-size:13px}*{box-sizing:border-box}body{margin:0;padding:16px}h2{margin:0 0 6px;font-size:13px;font-weight:600}p{margin:0}.pref-section{margin-bottom:18px}.small,small{font-size:11px}.secondary{opacity:.58}.pref-help{line-height:1.4}.library-section,.diagnostics-section{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;align-items:center}.primary-action{min-height:26px;padding:3px 12px;white-space:nowrap}.status{grid-column:1 / -1;min-height:14px;opacity:.7}.status[data-state=error]{color:#d13b32;opacity:1}.checkbox-row{display:flex;gap:7px;align-items:flex-start}.checkbox-row input{margin-top:1px}.checkbox-row span,.checkbox-row small{display:block}.checkbox-row small{margin-top:2px;line-height:1.35}.privacy-section{margin-bottom:0}@media(prefers-color-scheme:dark){.status[data-state=error]{color:#ff6961}}
+</style>
+  </head>
+  <body>
+    <section class="pref-section library-section" aria-labelledby="library-heading">
+      <div>
+        <h2 id="library-heading">Jellyfin Library</h2>
+        <p class="small secondary pref-help">
+          Connect, browse, and manage your Jellyfin account in the standalone library window. You
+          can also open it from IINA’s Plugins menu or press ⌥⌘J from any focused IINA window.
+        </p>
+      </div>
+      <button type="button" class="primary-action" data-open-catalog>Open Jellyfin Library</button>
+      <p class="small status" data-open-status role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="pref-section diagnostics-section" aria-labelledby="diagnostics-heading">
+      <div>
+        <h2 id="diagnostics-heading">Diagnostics</h2>
+        <p class="small secondary pref-help">
+          Jellyfin for IINA keeps a small rotating, redacted local log to make playback problems
+          easier to investigate. Authentication secrets and media URLs are never recorded.
+        </p>
+      </div>
+      <button type="button" data-reveal-diagnostics>Reveal Diagnostic Log</button>
+      <p class="small status" data-diagnostics-status role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="pref-section privacy-section" aria-labelledby="privacy-heading">
+      <h2 id="privacy-heading">Connection and Privacy</h2>
+      <p class="small secondary pref-help">
+        Server and account changes are made in the Jellyfin Library. Access tokens are stored in
+        macOS Keychain and are never exposed to this preferences page.
+      </p>
+    </section>
+
+  <script>const l="catalogOpenRequestAtMs",r="diagnosticLogRevealRequestAtMs";function d(n,a,s=Date.now){const i=n.querySelector("[data-open-catalog]"),t=n.querySelector("[data-open-status]");i!==null&&t!==null&&i.addEventListener("click",()=>{if(a===void 0){t.dataset.state="error",t.textContent="Use IINA’s Plugins menu → Open Jellyfin Library.";return}try{a.set(l,s()),delete t.dataset.state,t.textContent="Opening the Jellyfin Library…"}catch{t.dataset.state="error",t.textContent="Could not open the library. Use IINA’s Plugins menu instead."}});const o=n.querySelector("[data-reveal-diagnostics]"),e=n.querySelector("[data-diagnostics-status]");o===null||e===null||o.addEventListener("click",()=>{if(a===void 0){e.dataset.state="error",e.textContent="Use IINA’s Plugins menu → Reveal Jellyfin Diagnostic Log.";return}try{a.set(r,s()),delete e.dataset.state,e.textContent="Revealing the diagnostic log in Finder…"}catch{e.dataset.state="error",e.textContent="Could not reveal the log. Use IINA’s Plugins menu instead."}})}const u=window.iina?.preferences;d(document,u);
+</script></body>
+</html>

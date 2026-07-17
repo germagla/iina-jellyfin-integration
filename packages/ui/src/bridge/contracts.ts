@@ -9,6 +9,14 @@ export type BridgeOperation = CoreBridgeOperation;
 export type BridgeRequest = CoreBridgeRequest;
 export type MediaKind = 'movie' | 'series' | 'episode';
 
+export interface CatalogLibrary {
+  id: string;
+  name: string;
+  kind: Extract<MediaKind, 'movie' | 'series'>;
+}
+
+export type SupportedLibrary = CatalogLibrary;
+
 export interface MediaCard {
   id: string;
   title: string;
@@ -56,6 +64,8 @@ export interface EpisodeDetails extends MediaCard {
 
 export interface ShowDetails {
   id: string;
+  kind: MediaKind;
+  playable: boolean;
   title: string;
   episodeTitle: string;
   episodeLabel: string;
@@ -103,18 +113,32 @@ export interface BridgeResultMap {
   'connection.disconnect': { disconnected: true };
   'catalog.query': unknown;
   'artwork.fetch': { dataUrl: string };
-  'playback.start': {
-    status: 'started' | 'confirmation-required';
-    plan: {
-      playMethod: 'DirectPlay' | 'DirectStream' | 'Transcode';
-      conversion: 'none' | 'container' | 'audio' | 'video';
-      requiresVideoTranscodeConfirmation: boolean;
-      transcodeReasons: string[];
-      mediaSourceId: string;
-      audioStreamIndex?: number;
-      subtitleStreamIndex?: number;
-    };
-  };
+  'playback.start':
+    | {
+        status: 'started';
+        plan: {
+          playMethod: 'DirectPlay' | 'DirectStream' | 'Transcode';
+          conversion: 'none' | 'container' | 'audio' | 'video';
+          requiresVideoTranscodeConfirmation: boolean;
+          transcodeReasons: string[];
+          mediaSourceId: string;
+          audioStreamIndex?: number;
+          subtitleStreamIndex?: number;
+        };
+      }
+    | {
+        status: 'confirmation-required';
+        confirmationId: string;
+        plan: {
+          playMethod: 'DirectPlay' | 'DirectStream' | 'Transcode';
+          conversion: 'none' | 'container' | 'audio' | 'video';
+          requiresVideoTranscodeConfirmation: boolean;
+          transcodeReasons: string[];
+          mediaSourceId: string;
+          audioStreamIndex?: number;
+          subtitleStreamIndex?: number;
+        };
+      };
   'playback.stop': { stopped: true };
   'catalog.refresh': { connection?: PublicConnection; refreshedAt: string };
 }
@@ -123,13 +147,6 @@ export interface BridgeError {
   code: string;
   message: string;
   recoverable: boolean;
-}
-
-export interface PlaybackConfirmationNotice {
-  itemId: string;
-  source: 'up-next';
-  openInNewWindow: boolean;
-  plan: BridgeResultMap['playback.start']['plan'];
 }
 
 export type BridgeResponse<K extends BridgeOperation = BridgeOperation> =
@@ -152,9 +169,6 @@ export interface CatalogBridge {
     payload: BridgePayload<K>,
   ): Promise<BridgeResultMap[K]>;
   subscribeInvalidation?(listener: () => void): () => void;
-  subscribePlaybackConfirmation?(
-    listener: (notice: PlaybackConfirmationNotice) => void,
-  ): () => void;
 }
 
 export type { CatalogRequest, PlaybackRequest };

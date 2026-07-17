@@ -1,10 +1,1051 @@
 "use strict";
 (() => {
+  var __create = Object.create;
   var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __getProtoOf = Object.getPrototypeOf;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __commonJS = (cb, mod) => function __require() {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  };
   var __export = (target, all) => {
     for (var name in all)
       __defProp(target, name, { get: all[name], enumerable: true });
   };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    }
+    return to;
+  };
+  var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+    // If the importer is in node compatibility mode or this is not an ESM
+    // file that has been converted to a CommonJS file using a Babel-
+    // compatible transform (i.e. "__esModule" has not been set), then set
+    // "default" to the CommonJS "module.exports" for node compatibility.
+    isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+    mod
+  ));
+
+  // node_modules/.pnpm/uri-js@4.4.1/node_modules/uri-js/dist/es5/uri.all.js
+  var require_uri_all = __commonJS({
+    "node_modules/.pnpm/uri-js@4.4.1/node_modules/uri-js/dist/es5/uri.all.js"(exports, module) {
+      (function(global, factory) {
+        typeof exports === "object" && typeof module !== "undefined" ? factory(exports) : typeof define === "function" && define.amd ? define(["exports"], factory) : factory(global.URI = global.URI || {});
+      })(exports, (function(exports2) {
+        "use strict";
+        function merge() {
+          for (var _len = arguments.length, sets = Array(_len), _key = 0; _key < _len; _key++) {
+            sets[_key] = arguments[_key];
+          }
+          if (sets.length > 1) {
+            sets[0] = sets[0].slice(0, -1);
+            var xl = sets.length - 1;
+            for (var x = 1; x < xl; ++x) {
+              sets[x] = sets[x].slice(1, -1);
+            }
+            sets[xl] = sets[xl].slice(1);
+            return sets.join("");
+          } else {
+            return sets[0];
+          }
+        }
+        function subexp(str) {
+          return "(?:" + str + ")";
+        }
+        function typeOf(o) {
+          return o === void 0 ? "undefined" : o === null ? "null" : Object.prototype.toString.call(o).split(" ").pop().split("]").shift().toLowerCase();
+        }
+        function toUpperCase(str) {
+          return str.toUpperCase();
+        }
+        function toArray(obj) {
+          return obj !== void 0 && obj !== null ? obj instanceof Array ? obj : typeof obj.length !== "number" || obj.split || obj.setInterval || obj.call ? [obj] : Array.prototype.slice.call(obj) : [];
+        }
+        function assign(target, source) {
+          var obj = target;
+          if (source) {
+            for (var key in source) {
+              obj[key] = source[key];
+            }
+          }
+          return obj;
+        }
+        function buildExps(isIRI2) {
+          var ALPHA$$ = "[A-Za-z]", CR$ = "[\\x0D]", DIGIT$$ = "[0-9]", DQUOTE$$ = "[\\x22]", HEXDIG$$2 = merge(DIGIT$$, "[A-Fa-f]"), LF$$ = "[\\x0A]", SP$$ = "[\\x20]", PCT_ENCODED$2 = subexp(subexp("%[EFef]" + HEXDIG$$2 + "%" + HEXDIG$$2 + HEXDIG$$2 + "%" + HEXDIG$$2 + HEXDIG$$2) + "|" + subexp("%[89A-Fa-f]" + HEXDIG$$2 + "%" + HEXDIG$$2 + HEXDIG$$2) + "|" + subexp("%" + HEXDIG$$2 + HEXDIG$$2)), GEN_DELIMS$$ = "[\\:\\/\\?\\#\\[\\]\\@]", SUB_DELIMS$$ = "[\\!\\$\\&\\'\\(\\)\\*\\+\\,\\;\\=]", RESERVED$$ = merge(GEN_DELIMS$$, SUB_DELIMS$$), UCSCHAR$$ = isIRI2 ? "[\\xA0-\\u200D\\u2010-\\u2029\\u202F-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFEF]" : "[]", IPRIVATE$$ = isIRI2 ? "[\\uE000-\\uF8FF]" : "[]", UNRESERVED$$2 = merge(ALPHA$$, DIGIT$$, "[\\-\\.\\_\\~]", UCSCHAR$$), SCHEME$ = subexp(ALPHA$$ + merge(ALPHA$$, DIGIT$$, "[\\+\\-\\.]") + "*"), USERINFO$ = subexp(subexp(PCT_ENCODED$2 + "|" + merge(UNRESERVED$$2, SUB_DELIMS$$, "[\\:]")) + "*"), DEC_OCTET$ = subexp(subexp("25[0-5]") + "|" + subexp("2[0-4]" + DIGIT$$) + "|" + subexp("1" + DIGIT$$ + DIGIT$$) + "|" + subexp("[1-9]" + DIGIT$$) + "|" + DIGIT$$), DEC_OCTET_RELAXED$ = subexp(subexp("25[0-5]") + "|" + subexp("2[0-4]" + DIGIT$$) + "|" + subexp("1" + DIGIT$$ + DIGIT$$) + "|" + subexp("0?[1-9]" + DIGIT$$) + "|0?0?" + DIGIT$$), IPV4ADDRESS$ = subexp(DEC_OCTET_RELAXED$ + "\\." + DEC_OCTET_RELAXED$ + "\\." + DEC_OCTET_RELAXED$ + "\\." + DEC_OCTET_RELAXED$), H16$ = subexp(HEXDIG$$2 + "{1,4}"), LS32$ = subexp(subexp(H16$ + "\\:" + H16$) + "|" + IPV4ADDRESS$), IPV6ADDRESS1$ = subexp(subexp(H16$ + "\\:") + "{6}" + LS32$), IPV6ADDRESS2$ = subexp("\\:\\:" + subexp(H16$ + "\\:") + "{5}" + LS32$), IPV6ADDRESS3$ = subexp(subexp(H16$) + "?\\:\\:" + subexp(H16$ + "\\:") + "{4}" + LS32$), IPV6ADDRESS4$ = subexp(subexp(subexp(H16$ + "\\:") + "{0,1}" + H16$) + "?\\:\\:" + subexp(H16$ + "\\:") + "{3}" + LS32$), IPV6ADDRESS5$ = subexp(subexp(subexp(H16$ + "\\:") + "{0,2}" + H16$) + "?\\:\\:" + subexp(H16$ + "\\:") + "{2}" + LS32$), IPV6ADDRESS6$ = subexp(subexp(subexp(H16$ + "\\:") + "{0,3}" + H16$) + "?\\:\\:" + H16$ + "\\:" + LS32$), IPV6ADDRESS7$ = subexp(subexp(subexp(H16$ + "\\:") + "{0,4}" + H16$) + "?\\:\\:" + LS32$), IPV6ADDRESS8$ = subexp(subexp(subexp(H16$ + "\\:") + "{0,5}" + H16$) + "?\\:\\:" + H16$), IPV6ADDRESS9$ = subexp(subexp(subexp(H16$ + "\\:") + "{0,6}" + H16$) + "?\\:\\:"), IPV6ADDRESS$ = subexp([IPV6ADDRESS1$, IPV6ADDRESS2$, IPV6ADDRESS3$, IPV6ADDRESS4$, IPV6ADDRESS5$, IPV6ADDRESS6$, IPV6ADDRESS7$, IPV6ADDRESS8$, IPV6ADDRESS9$].join("|")), ZONEID$ = subexp(subexp(UNRESERVED$$2 + "|" + PCT_ENCODED$2) + "+"), IPV6ADDRZ$ = subexp(IPV6ADDRESS$ + "\\%25" + ZONEID$), IPV6ADDRZ_RELAXED$ = subexp(IPV6ADDRESS$ + subexp("\\%25|\\%(?!" + HEXDIG$$2 + "{2})") + ZONEID$), IPVFUTURE$ = subexp("[vV]" + HEXDIG$$2 + "+\\." + merge(UNRESERVED$$2, SUB_DELIMS$$, "[\\:]") + "+"), IP_LITERAL$ = subexp("\\[" + subexp(IPV6ADDRZ_RELAXED$ + "|" + IPV6ADDRESS$ + "|" + IPVFUTURE$) + "\\]"), REG_NAME$ = subexp(subexp(PCT_ENCODED$2 + "|" + merge(UNRESERVED$$2, SUB_DELIMS$$)) + "*"), HOST$ = subexp(IP_LITERAL$ + "|" + IPV4ADDRESS$ + "(?!" + REG_NAME$ + ")|" + REG_NAME$), PORT$ = subexp(DIGIT$$ + "*"), AUTHORITY$ = subexp(subexp(USERINFO$ + "@") + "?" + HOST$ + subexp("\\:" + PORT$) + "?"), PCHAR$ = subexp(PCT_ENCODED$2 + "|" + merge(UNRESERVED$$2, SUB_DELIMS$$, "[\\:\\@]")), SEGMENT$ = subexp(PCHAR$ + "*"), SEGMENT_NZ$ = subexp(PCHAR$ + "+"), SEGMENT_NZ_NC$ = subexp(subexp(PCT_ENCODED$2 + "|" + merge(UNRESERVED$$2, SUB_DELIMS$$, "[\\@]")) + "+"), PATH_ABEMPTY$ = subexp(subexp("\\/" + SEGMENT$) + "*"), PATH_ABSOLUTE$ = subexp("\\/" + subexp(SEGMENT_NZ$ + PATH_ABEMPTY$) + "?"), PATH_NOSCHEME$ = subexp(SEGMENT_NZ_NC$ + PATH_ABEMPTY$), PATH_ROOTLESS$ = subexp(SEGMENT_NZ$ + PATH_ABEMPTY$), PATH_EMPTY$ = "(?!" + PCHAR$ + ")", PATH$ = subexp(PATH_ABEMPTY$ + "|" + PATH_ABSOLUTE$ + "|" + PATH_NOSCHEME$ + "|" + PATH_ROOTLESS$ + "|" + PATH_EMPTY$), QUERY$ = subexp(subexp(PCHAR$ + "|" + merge("[\\/\\?]", IPRIVATE$$)) + "*"), FRAGMENT$ = subexp(subexp(PCHAR$ + "|[\\/\\?]") + "*"), HIER_PART$ = subexp(subexp("\\/\\/" + AUTHORITY$ + PATH_ABEMPTY$) + "|" + PATH_ABSOLUTE$ + "|" + PATH_ROOTLESS$ + "|" + PATH_EMPTY$), URI$ = subexp(SCHEME$ + "\\:" + HIER_PART$ + subexp("\\?" + QUERY$) + "?" + subexp("\\#" + FRAGMENT$) + "?"), RELATIVE_PART$ = subexp(subexp("\\/\\/" + AUTHORITY$ + PATH_ABEMPTY$) + "|" + PATH_ABSOLUTE$ + "|" + PATH_NOSCHEME$ + "|" + PATH_EMPTY$), RELATIVE$ = subexp(RELATIVE_PART$ + subexp("\\?" + QUERY$) + "?" + subexp("\\#" + FRAGMENT$) + "?"), URI_REFERENCE$ = subexp(URI$ + "|" + RELATIVE$), ABSOLUTE_URI$ = subexp(SCHEME$ + "\\:" + HIER_PART$ + subexp("\\?" + QUERY$) + "?"), GENERIC_REF$ = "^(" + SCHEME$ + ")\\:" + subexp(subexp("\\/\\/(" + subexp("(" + USERINFO$ + ")@") + "?(" + HOST$ + ")" + subexp("\\:(" + PORT$ + ")") + "?)") + "?(" + PATH_ABEMPTY$ + "|" + PATH_ABSOLUTE$ + "|" + PATH_ROOTLESS$ + "|" + PATH_EMPTY$ + ")") + subexp("\\?(" + QUERY$ + ")") + "?" + subexp("\\#(" + FRAGMENT$ + ")") + "?$", RELATIVE_REF$ = "^(){0}" + subexp(subexp("\\/\\/(" + subexp("(" + USERINFO$ + ")@") + "?(" + HOST$ + ")" + subexp("\\:(" + PORT$ + ")") + "?)") + "?(" + PATH_ABEMPTY$ + "|" + PATH_ABSOLUTE$ + "|" + PATH_NOSCHEME$ + "|" + PATH_EMPTY$ + ")") + subexp("\\?(" + QUERY$ + ")") + "?" + subexp("\\#(" + FRAGMENT$ + ")") + "?$", ABSOLUTE_REF$ = "^(" + SCHEME$ + ")\\:" + subexp(subexp("\\/\\/(" + subexp("(" + USERINFO$ + ")@") + "?(" + HOST$ + ")" + subexp("\\:(" + PORT$ + ")") + "?)") + "?(" + PATH_ABEMPTY$ + "|" + PATH_ABSOLUTE$ + "|" + PATH_ROOTLESS$ + "|" + PATH_EMPTY$ + ")") + subexp("\\?(" + QUERY$ + ")") + "?$", SAMEDOC_REF$ = "^" + subexp("\\#(" + FRAGMENT$ + ")") + "?$", AUTHORITY_REF$ = "^" + subexp("(" + USERINFO$ + ")@") + "?(" + HOST$ + ")" + subexp("\\:(" + PORT$ + ")") + "?$";
+          return {
+            NOT_SCHEME: new RegExp(merge("[^]", ALPHA$$, DIGIT$$, "[\\+\\-\\.]"), "g"),
+            NOT_USERINFO: new RegExp(merge("[^\\%\\:]", UNRESERVED$$2, SUB_DELIMS$$), "g"),
+            NOT_HOST: new RegExp(merge("[^\\%\\[\\]\\:]", UNRESERVED$$2, SUB_DELIMS$$), "g"),
+            NOT_PATH: new RegExp(merge("[^\\%\\/\\:\\@]", UNRESERVED$$2, SUB_DELIMS$$), "g"),
+            NOT_PATH_NOSCHEME: new RegExp(merge("[^\\%\\/\\@]", UNRESERVED$$2, SUB_DELIMS$$), "g"),
+            NOT_QUERY: new RegExp(merge("[^\\%]", UNRESERVED$$2, SUB_DELIMS$$, "[\\:\\@\\/\\?]", IPRIVATE$$), "g"),
+            NOT_FRAGMENT: new RegExp(merge("[^\\%]", UNRESERVED$$2, SUB_DELIMS$$, "[\\:\\@\\/\\?]"), "g"),
+            ESCAPE: new RegExp(merge("[^]", UNRESERVED$$2, SUB_DELIMS$$), "g"),
+            UNRESERVED: new RegExp(UNRESERVED$$2, "g"),
+            OTHER_CHARS: new RegExp(merge("[^\\%]", UNRESERVED$$2, RESERVED$$), "g"),
+            PCT_ENCODED: new RegExp(PCT_ENCODED$2, "g"),
+            IPV4ADDRESS: new RegExp("^(" + IPV4ADDRESS$ + ")$"),
+            IPV6ADDRESS: new RegExp("^\\[?(" + IPV6ADDRESS$ + ")" + subexp(subexp("\\%25|\\%(?!" + HEXDIG$$2 + "{2})") + "(" + ZONEID$ + ")") + "?\\]?$")
+            //RFC 6874, with relaxed parsing rules
+          };
+        }
+        var URI_PROTOCOL = buildExps(false);
+        var IRI_PROTOCOL = buildExps(true);
+        var slicedToArray = /* @__PURE__ */ (function() {
+          function sliceIterator(arr, i) {
+            var _arr = [];
+            var _n = true;
+            var _d = false;
+            var _e = void 0;
+            try {
+              for (var _i = arr[Symbol.iterator](), _s; !(_n = (_s = _i.next()).done); _n = true) {
+                _arr.push(_s.value);
+                if (i && _arr.length === i) break;
+              }
+            } catch (err) {
+              _d = true;
+              _e = err;
+            } finally {
+              try {
+                if (!_n && _i["return"]) _i["return"]();
+              } finally {
+                if (_d) throw _e;
+              }
+            }
+            return _arr;
+          }
+          return function(arr, i) {
+            if (Array.isArray(arr)) {
+              return arr;
+            } else if (Symbol.iterator in Object(arr)) {
+              return sliceIterator(arr, i);
+            } else {
+              throw new TypeError("Invalid attempt to destructure non-iterable instance");
+            }
+          };
+        })();
+        var toConsumableArray = function(arr) {
+          if (Array.isArray(arr)) {
+            for (var i = 0, arr2 = Array(arr.length); i < arr.length; i++) arr2[i] = arr[i];
+            return arr2;
+          } else {
+            return Array.from(arr);
+          }
+        };
+        var maxInt = 2147483647;
+        var base = 36;
+        var tMin = 1;
+        var tMax = 26;
+        var skew = 38;
+        var damp = 700;
+        var initialBias = 72;
+        var initialN = 128;
+        var delimiter = "-";
+        var regexPunycode = /^xn--/;
+        var regexNonASCII = /[^\0-\x7E]/;
+        var regexSeparators = /[\x2E\u3002\uFF0E\uFF61]/g;
+        var errors = {
+          "overflow": "Overflow: input needs wider integers to process",
+          "not-basic": "Illegal input >= 0x80 (not a basic code point)",
+          "invalid-input": "Invalid input"
+        };
+        var baseMinusTMin = base - tMin;
+        var floor = Math.floor;
+        var stringFromCharCode = String.fromCharCode;
+        function error$1(type) {
+          throw new RangeError(errors[type]);
+        }
+        function map(array, fn) {
+          var result = [];
+          var length = array.length;
+          while (length--) {
+            result[length] = fn(array[length]);
+          }
+          return result;
+        }
+        function mapDomain(string, fn) {
+          var parts = string.split("@");
+          var result = "";
+          if (parts.length > 1) {
+            result = parts[0] + "@";
+            string = parts[1];
+          }
+          string = string.replace(regexSeparators, ".");
+          var labels = string.split(".");
+          var encoded = map(labels, fn).join(".");
+          return result + encoded;
+        }
+        function ucs2decode(string) {
+          var output = [];
+          var counter = 0;
+          var length = string.length;
+          while (counter < length) {
+            var value = string.charCodeAt(counter++);
+            if (value >= 55296 && value <= 56319 && counter < length) {
+              var extra = string.charCodeAt(counter++);
+              if ((extra & 64512) == 56320) {
+                output.push(((value & 1023) << 10) + (extra & 1023) + 65536);
+              } else {
+                output.push(value);
+                counter--;
+              }
+            } else {
+              output.push(value);
+            }
+          }
+          return output;
+        }
+        var ucs2encode = function ucs2encode2(array) {
+          return String.fromCodePoint.apply(String, toConsumableArray(array));
+        };
+        var basicToDigit = function basicToDigit2(codePoint) {
+          if (codePoint - 48 < 10) {
+            return codePoint - 22;
+          }
+          if (codePoint - 65 < 26) {
+            return codePoint - 65;
+          }
+          if (codePoint - 97 < 26) {
+            return codePoint - 97;
+          }
+          return base;
+        };
+        var digitToBasic = function digitToBasic2(digit, flag) {
+          return digit + 22 + 75 * (digit < 26) - ((flag != 0) << 5);
+        };
+        var adapt = function adapt2(delta, numPoints, firstTime) {
+          var k = 0;
+          delta = firstTime ? floor(delta / damp) : delta >> 1;
+          delta += floor(delta / numPoints);
+          for (
+            ;
+            /* no initialization */
+            delta > baseMinusTMin * tMax >> 1;
+            k += base
+          ) {
+            delta = floor(delta / baseMinusTMin);
+          }
+          return floor(k + (baseMinusTMin + 1) * delta / (delta + skew));
+        };
+        var decode = function decode2(input) {
+          var output = [];
+          var inputLength = input.length;
+          var i = 0;
+          var n = initialN;
+          var bias = initialBias;
+          var basic = input.lastIndexOf(delimiter);
+          if (basic < 0) {
+            basic = 0;
+          }
+          for (var j = 0; j < basic; ++j) {
+            if (input.charCodeAt(j) >= 128) {
+              error$1("not-basic");
+            }
+            output.push(input.charCodeAt(j));
+          }
+          for (var index = basic > 0 ? basic + 1 : 0; index < inputLength; ) {
+            var oldi = i;
+            for (
+              var w = 1, k = base;
+              ;
+              /* no condition */
+              k += base
+            ) {
+              if (index >= inputLength) {
+                error$1("invalid-input");
+              }
+              var digit = basicToDigit(input.charCodeAt(index++));
+              if (digit >= base || digit > floor((maxInt - i) / w)) {
+                error$1("overflow");
+              }
+              i += digit * w;
+              var t = k <= bias ? tMin : k >= bias + tMax ? tMax : k - bias;
+              if (digit < t) {
+                break;
+              }
+              var baseMinusT = base - t;
+              if (w > floor(maxInt / baseMinusT)) {
+                error$1("overflow");
+              }
+              w *= baseMinusT;
+            }
+            var out = output.length + 1;
+            bias = adapt(i - oldi, out, oldi == 0);
+            if (floor(i / out) > maxInt - n) {
+              error$1("overflow");
+            }
+            n += floor(i / out);
+            i %= out;
+            output.splice(i++, 0, n);
+          }
+          return String.fromCodePoint.apply(String, output);
+        };
+        var encode = function encode2(input) {
+          var output = [];
+          input = ucs2decode(input);
+          var inputLength = input.length;
+          var n = initialN;
+          var delta = 0;
+          var bias = initialBias;
+          var _iteratorNormalCompletion = true;
+          var _didIteratorError = false;
+          var _iteratorError = void 0;
+          try {
+            for (var _iterator = input[Symbol.iterator](), _step; !(_iteratorNormalCompletion = (_step = _iterator.next()).done); _iteratorNormalCompletion = true) {
+              var _currentValue2 = _step.value;
+              if (_currentValue2 < 128) {
+                output.push(stringFromCharCode(_currentValue2));
+              }
+            }
+          } catch (err) {
+            _didIteratorError = true;
+            _iteratorError = err;
+          } finally {
+            try {
+              if (!_iteratorNormalCompletion && _iterator.return) {
+                _iterator.return();
+              }
+            } finally {
+              if (_didIteratorError) {
+                throw _iteratorError;
+              }
+            }
+          }
+          var basicLength = output.length;
+          var handledCPCount = basicLength;
+          if (basicLength) {
+            output.push(delimiter);
+          }
+          while (handledCPCount < inputLength) {
+            var m = maxInt;
+            var _iteratorNormalCompletion2 = true;
+            var _didIteratorError2 = false;
+            var _iteratorError2 = void 0;
+            try {
+              for (var _iterator2 = input[Symbol.iterator](), _step2; !(_iteratorNormalCompletion2 = (_step2 = _iterator2.next()).done); _iteratorNormalCompletion2 = true) {
+                var currentValue = _step2.value;
+                if (currentValue >= n && currentValue < m) {
+                  m = currentValue;
+                }
+              }
+            } catch (err) {
+              _didIteratorError2 = true;
+              _iteratorError2 = err;
+            } finally {
+              try {
+                if (!_iteratorNormalCompletion2 && _iterator2.return) {
+                  _iterator2.return();
+                }
+              } finally {
+                if (_didIteratorError2) {
+                  throw _iteratorError2;
+                }
+              }
+            }
+            var handledCPCountPlusOne = handledCPCount + 1;
+            if (m - n > floor((maxInt - delta) / handledCPCountPlusOne)) {
+              error$1("overflow");
+            }
+            delta += (m - n) * handledCPCountPlusOne;
+            n = m;
+            var _iteratorNormalCompletion3 = true;
+            var _didIteratorError3 = false;
+            var _iteratorError3 = void 0;
+            try {
+              for (var _iterator3 = input[Symbol.iterator](), _step3; !(_iteratorNormalCompletion3 = (_step3 = _iterator3.next()).done); _iteratorNormalCompletion3 = true) {
+                var _currentValue = _step3.value;
+                if (_currentValue < n && ++delta > maxInt) {
+                  error$1("overflow");
+                }
+                if (_currentValue == n) {
+                  var q = delta;
+                  for (
+                    var k = base;
+                    ;
+                    /* no condition */
+                    k += base
+                  ) {
+                    var t = k <= bias ? tMin : k >= bias + tMax ? tMax : k - bias;
+                    if (q < t) {
+                      break;
+                    }
+                    var qMinusT = q - t;
+                    var baseMinusT = base - t;
+                    output.push(stringFromCharCode(digitToBasic(t + qMinusT % baseMinusT, 0)));
+                    q = floor(qMinusT / baseMinusT);
+                  }
+                  output.push(stringFromCharCode(digitToBasic(q, 0)));
+                  bias = adapt(delta, handledCPCountPlusOne, handledCPCount == basicLength);
+                  delta = 0;
+                  ++handledCPCount;
+                }
+              }
+            } catch (err) {
+              _didIteratorError3 = true;
+              _iteratorError3 = err;
+            } finally {
+              try {
+                if (!_iteratorNormalCompletion3 && _iterator3.return) {
+                  _iterator3.return();
+                }
+              } finally {
+                if (_didIteratorError3) {
+                  throw _iteratorError3;
+                }
+              }
+            }
+            ++delta;
+            ++n;
+          }
+          return output.join("");
+        };
+        var toUnicode = function toUnicode2(input) {
+          return mapDomain(input, function(string) {
+            return regexPunycode.test(string) ? decode(string.slice(4).toLowerCase()) : string;
+          });
+        };
+        var toASCII = function toASCII2(input) {
+          return mapDomain(input, function(string) {
+            return regexNonASCII.test(string) ? "xn--" + encode(string) : string;
+          });
+        };
+        var punycode = {
+          /**
+           * A string representing the current Punycode.js version number.
+           * @memberOf punycode
+           * @type String
+           */
+          "version": "2.1.0",
+          /**
+           * An object of methods to convert from JavaScript's internal character
+           * representation (UCS-2) to Unicode code points, and back.
+           * @see <https://mathiasbynens.be/notes/javascript-encoding>
+           * @memberOf punycode
+           * @type Object
+           */
+          "ucs2": {
+            "decode": ucs2decode,
+            "encode": ucs2encode
+          },
+          "decode": decode,
+          "encode": encode,
+          "toASCII": toASCII,
+          "toUnicode": toUnicode
+        };
+        var SCHEMES = {};
+        function pctEncChar(chr) {
+          var c = chr.charCodeAt(0);
+          var e = void 0;
+          if (c < 16) e = "%0" + c.toString(16).toUpperCase();
+          else if (c < 128) e = "%" + c.toString(16).toUpperCase();
+          else if (c < 2048) e = "%" + (c >> 6 | 192).toString(16).toUpperCase() + "%" + (c & 63 | 128).toString(16).toUpperCase();
+          else e = "%" + (c >> 12 | 224).toString(16).toUpperCase() + "%" + (c >> 6 & 63 | 128).toString(16).toUpperCase() + "%" + (c & 63 | 128).toString(16).toUpperCase();
+          return e;
+        }
+        function pctDecChars(str) {
+          var newStr = "";
+          var i = 0;
+          var il = str.length;
+          while (i < il) {
+            var c = parseInt(str.substr(i + 1, 2), 16);
+            if (c < 128) {
+              newStr += String.fromCharCode(c);
+              i += 3;
+            } else if (c >= 194 && c < 224) {
+              if (il - i >= 6) {
+                var c2 = parseInt(str.substr(i + 4, 2), 16);
+                newStr += String.fromCharCode((c & 31) << 6 | c2 & 63);
+              } else {
+                newStr += str.substr(i, 6);
+              }
+              i += 6;
+            } else if (c >= 224) {
+              if (il - i >= 9) {
+                var _c = parseInt(str.substr(i + 4, 2), 16);
+                var c3 = parseInt(str.substr(i + 7, 2), 16);
+                newStr += String.fromCharCode((c & 15) << 12 | (_c & 63) << 6 | c3 & 63);
+              } else {
+                newStr += str.substr(i, 9);
+              }
+              i += 9;
+            } else {
+              newStr += str.substr(i, 3);
+              i += 3;
+            }
+          }
+          return newStr;
+        }
+        function _normalizeComponentEncoding(components, protocol) {
+          function decodeUnreserved2(str) {
+            var decStr = pctDecChars(str);
+            return !decStr.match(protocol.UNRESERVED) ? str : decStr;
+          }
+          if (components.scheme) components.scheme = String(components.scheme).replace(protocol.PCT_ENCODED, decodeUnreserved2).toLowerCase().replace(protocol.NOT_SCHEME, "");
+          if (components.userinfo !== void 0) components.userinfo = String(components.userinfo).replace(protocol.PCT_ENCODED, decodeUnreserved2).replace(protocol.NOT_USERINFO, pctEncChar).replace(protocol.PCT_ENCODED, toUpperCase);
+          if (components.host !== void 0) components.host = String(components.host).replace(protocol.PCT_ENCODED, decodeUnreserved2).toLowerCase().replace(protocol.NOT_HOST, pctEncChar).replace(protocol.PCT_ENCODED, toUpperCase);
+          if (components.path !== void 0) components.path = String(components.path).replace(protocol.PCT_ENCODED, decodeUnreserved2).replace(components.scheme ? protocol.NOT_PATH : protocol.NOT_PATH_NOSCHEME, pctEncChar).replace(protocol.PCT_ENCODED, toUpperCase);
+          if (components.query !== void 0) components.query = String(components.query).replace(protocol.PCT_ENCODED, decodeUnreserved2).replace(protocol.NOT_QUERY, pctEncChar).replace(protocol.PCT_ENCODED, toUpperCase);
+          if (components.fragment !== void 0) components.fragment = String(components.fragment).replace(protocol.PCT_ENCODED, decodeUnreserved2).replace(protocol.NOT_FRAGMENT, pctEncChar).replace(protocol.PCT_ENCODED, toUpperCase);
+          return components;
+        }
+        function _stripLeadingZeros(str) {
+          return str.replace(/^0*(.*)/, "$1") || "0";
+        }
+        function _normalizeIPv4(host, protocol) {
+          var matches = host.match(protocol.IPV4ADDRESS) || [];
+          var _matches = slicedToArray(matches, 2), address = _matches[1];
+          if (address) {
+            return address.split(".").map(_stripLeadingZeros).join(".");
+          } else {
+            return host;
+          }
+        }
+        function _normalizeIPv6(host, protocol) {
+          var matches = host.match(protocol.IPV6ADDRESS) || [];
+          var _matches2 = slicedToArray(matches, 3), address = _matches2[1], zone = _matches2[2];
+          if (address) {
+            var _address$toLowerCase$ = address.toLowerCase().split("::").reverse(), _address$toLowerCase$2 = slicedToArray(_address$toLowerCase$, 2), last = _address$toLowerCase$2[0], first = _address$toLowerCase$2[1];
+            var firstFields = first ? first.split(":").map(_stripLeadingZeros) : [];
+            var lastFields = last.split(":").map(_stripLeadingZeros);
+            var isLastFieldIPv4Address = protocol.IPV4ADDRESS.test(lastFields[lastFields.length - 1]);
+            var fieldCount = isLastFieldIPv4Address ? 7 : 8;
+            var lastFieldsStart = lastFields.length - fieldCount;
+            var fields = Array(fieldCount);
+            for (var x = 0; x < fieldCount; ++x) {
+              fields[x] = firstFields[x] || lastFields[lastFieldsStart + x] || "";
+            }
+            if (isLastFieldIPv4Address) {
+              fields[fieldCount - 1] = _normalizeIPv4(fields[fieldCount - 1], protocol);
+            }
+            var allZeroFields = fields.reduce(function(acc, field, index) {
+              if (!field || field === "0") {
+                var lastLongest = acc[acc.length - 1];
+                if (lastLongest && lastLongest.index + lastLongest.length === index) {
+                  lastLongest.length++;
+                } else {
+                  acc.push({ index, length: 1 });
+                }
+              }
+              return acc;
+            }, []);
+            var longestZeroFields = allZeroFields.sort(function(a, b) {
+              return b.length - a.length;
+            })[0];
+            var newHost = void 0;
+            if (longestZeroFields && longestZeroFields.length > 1) {
+              var newFirst = fields.slice(0, longestZeroFields.index);
+              var newLast = fields.slice(longestZeroFields.index + longestZeroFields.length);
+              newHost = newFirst.join(":") + "::" + newLast.join(":");
+            } else {
+              newHost = fields.join(":");
+            }
+            if (zone) {
+              newHost += "%" + zone;
+            }
+            return newHost;
+          } else {
+            return host;
+          }
+        }
+        var URI_PARSE = /^(?:([^:\/?#]+):)?(?:\/\/((?:([^\/?#@]*)@)?(\[[^\/?#\]]+\]|[^\/?#:]*)(?:\:(\d*))?))?([^?#]*)(?:\?([^#]*))?(?:#((?:.|\n|\r)*))?/i;
+        var NO_MATCH_IS_UNDEFINED = "".match(/(){0}/)[1] === void 0;
+        function parse(uriString) {
+          var options = arguments.length > 1 && arguments[1] !== void 0 ? arguments[1] : {};
+          var components = {};
+          var protocol = options.iri !== false ? IRI_PROTOCOL : URI_PROTOCOL;
+          if (options.reference === "suffix") uriString = (options.scheme ? options.scheme + ":" : "") + "//" + uriString;
+          var matches = uriString.match(URI_PARSE);
+          if (matches) {
+            if (NO_MATCH_IS_UNDEFINED) {
+              components.scheme = matches[1];
+              components.userinfo = matches[3];
+              components.host = matches[4];
+              components.port = parseInt(matches[5], 10);
+              components.path = matches[6] || "";
+              components.query = matches[7];
+              components.fragment = matches[8];
+              if (isNaN(components.port)) {
+                components.port = matches[5];
+              }
+            } else {
+              components.scheme = matches[1] || void 0;
+              components.userinfo = uriString.indexOf("@") !== -1 ? matches[3] : void 0;
+              components.host = uriString.indexOf("//") !== -1 ? matches[4] : void 0;
+              components.port = parseInt(matches[5], 10);
+              components.path = matches[6] || "";
+              components.query = uriString.indexOf("?") !== -1 ? matches[7] : void 0;
+              components.fragment = uriString.indexOf("#") !== -1 ? matches[8] : void 0;
+              if (isNaN(components.port)) {
+                components.port = uriString.match(/\/\/(?:.|\n)*\:(?:\/|\?|\#|$)/) ? matches[4] : void 0;
+              }
+            }
+            if (components.host) {
+              components.host = _normalizeIPv6(_normalizeIPv4(components.host, protocol), protocol);
+            }
+            if (components.scheme === void 0 && components.userinfo === void 0 && components.host === void 0 && components.port === void 0 && !components.path && components.query === void 0) {
+              components.reference = "same-document";
+            } else if (components.scheme === void 0) {
+              components.reference = "relative";
+            } else if (components.fragment === void 0) {
+              components.reference = "absolute";
+            } else {
+              components.reference = "uri";
+            }
+            if (options.reference && options.reference !== "suffix" && options.reference !== components.reference) {
+              components.error = components.error || "URI is not a " + options.reference + " reference.";
+            }
+            var schemeHandler = SCHEMES[(options.scheme || components.scheme || "").toLowerCase()];
+            if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
+              if (components.host && (options.domainHost || schemeHandler && schemeHandler.domainHost)) {
+                try {
+                  components.host = punycode.toASCII(components.host.replace(protocol.PCT_ENCODED, pctDecChars).toLowerCase());
+                } catch (e) {
+                  components.error = components.error || "Host's domain name can not be converted to ASCII via punycode: " + e;
+                }
+              }
+              _normalizeComponentEncoding(components, URI_PROTOCOL);
+            } else {
+              _normalizeComponentEncoding(components, protocol);
+            }
+            if (schemeHandler && schemeHandler.parse) {
+              schemeHandler.parse(components, options);
+            }
+          } else {
+            components.error = components.error || "URI can not be parsed.";
+          }
+          return components;
+        }
+        function _recomposeAuthority(components, options) {
+          var protocol = options.iri !== false ? IRI_PROTOCOL : URI_PROTOCOL;
+          var uriTokens = [];
+          if (components.userinfo !== void 0) {
+            uriTokens.push(components.userinfo);
+            uriTokens.push("@");
+          }
+          if (components.host !== void 0) {
+            uriTokens.push(_normalizeIPv6(_normalizeIPv4(String(components.host), protocol), protocol).replace(protocol.IPV6ADDRESS, function(_, $1, $2) {
+              return "[" + $1 + ($2 ? "%25" + $2 : "") + "]";
+            }));
+          }
+          if (typeof components.port === "number" || typeof components.port === "string") {
+            uriTokens.push(":");
+            uriTokens.push(String(components.port));
+          }
+          return uriTokens.length ? uriTokens.join("") : void 0;
+        }
+        var RDS1 = /^\.\.?\//;
+        var RDS2 = /^\/\.(\/|$)/;
+        var RDS3 = /^\/\.\.(\/|$)/;
+        var RDS5 = /^\/?(?:.|\n)*?(?=\/|$)/;
+        function removeDotSegments(input) {
+          var output = [];
+          while (input.length) {
+            if (input.match(RDS1)) {
+              input = input.replace(RDS1, "");
+            } else if (input.match(RDS2)) {
+              input = input.replace(RDS2, "/");
+            } else if (input.match(RDS3)) {
+              input = input.replace(RDS3, "/");
+              output.pop();
+            } else if (input === "." || input === "..") {
+              input = "";
+            } else {
+              var im = input.match(RDS5);
+              if (im) {
+                var s = im[0];
+                input = input.slice(s.length);
+                output.push(s);
+              } else {
+                throw new Error("Unexpected dot segment condition");
+              }
+            }
+          }
+          return output.join("");
+        }
+        function serialize2(components) {
+          var options = arguments.length > 1 && arguments[1] !== void 0 ? arguments[1] : {};
+          var protocol = options.iri ? IRI_PROTOCOL : URI_PROTOCOL;
+          var uriTokens = [];
+          var schemeHandler = SCHEMES[(options.scheme || components.scheme || "").toLowerCase()];
+          if (schemeHandler && schemeHandler.serialize) schemeHandler.serialize(components, options);
+          if (components.host) {
+            if (protocol.IPV6ADDRESS.test(components.host)) {
+            } else if (options.domainHost || schemeHandler && schemeHandler.domainHost) {
+              try {
+                components.host = !options.iri ? punycode.toASCII(components.host.replace(protocol.PCT_ENCODED, pctDecChars).toLowerCase()) : punycode.toUnicode(components.host);
+              } catch (e) {
+                components.error = components.error || "Host's domain name can not be converted to " + (!options.iri ? "ASCII" : "Unicode") + " via punycode: " + e;
+              }
+            }
+          }
+          _normalizeComponentEncoding(components, protocol);
+          if (options.reference !== "suffix" && components.scheme) {
+            uriTokens.push(components.scheme);
+            uriTokens.push(":");
+          }
+          var authority = _recomposeAuthority(components, options);
+          if (authority !== void 0) {
+            if (options.reference !== "suffix") {
+              uriTokens.push("//");
+            }
+            uriTokens.push(authority);
+            if (components.path && components.path.charAt(0) !== "/") {
+              uriTokens.push("/");
+            }
+          }
+          if (components.path !== void 0) {
+            var s = components.path;
+            if (!options.absolutePath && (!schemeHandler || !schemeHandler.absolutePath)) {
+              s = removeDotSegments(s);
+            }
+            if (authority === void 0) {
+              s = s.replace(/^\/\//, "/%2F");
+            }
+            uriTokens.push(s);
+          }
+          if (components.query !== void 0) {
+            uriTokens.push("?");
+            uriTokens.push(components.query);
+          }
+          if (components.fragment !== void 0) {
+            uriTokens.push("#");
+            uriTokens.push(components.fragment);
+          }
+          return uriTokens.join("");
+        }
+        function resolveComponents(base2, relative) {
+          var options = arguments.length > 2 && arguments[2] !== void 0 ? arguments[2] : {};
+          var skipNormalization = arguments[3];
+          var target = {};
+          if (!skipNormalization) {
+            base2 = parse(serialize2(base2, options), options);
+            relative = parse(serialize2(relative, options), options);
+          }
+          options = options || {};
+          if (!options.tolerant && relative.scheme) {
+            target.scheme = relative.scheme;
+            target.userinfo = relative.userinfo;
+            target.host = relative.host;
+            target.port = relative.port;
+            target.path = removeDotSegments(relative.path || "");
+            target.query = relative.query;
+          } else {
+            if (relative.userinfo !== void 0 || relative.host !== void 0 || relative.port !== void 0) {
+              target.userinfo = relative.userinfo;
+              target.host = relative.host;
+              target.port = relative.port;
+              target.path = removeDotSegments(relative.path || "");
+              target.query = relative.query;
+            } else {
+              if (!relative.path) {
+                target.path = base2.path;
+                if (relative.query !== void 0) {
+                  target.query = relative.query;
+                } else {
+                  target.query = base2.query;
+                }
+              } else {
+                if (relative.path.charAt(0) === "/") {
+                  target.path = removeDotSegments(relative.path);
+                } else {
+                  if ((base2.userinfo !== void 0 || base2.host !== void 0 || base2.port !== void 0) && !base2.path) {
+                    target.path = "/" + relative.path;
+                  } else if (!base2.path) {
+                    target.path = relative.path;
+                  } else {
+                    target.path = base2.path.slice(0, base2.path.lastIndexOf("/") + 1) + relative.path;
+                  }
+                  target.path = removeDotSegments(target.path);
+                }
+                target.query = relative.query;
+              }
+              target.userinfo = base2.userinfo;
+              target.host = base2.host;
+              target.port = base2.port;
+            }
+            target.scheme = base2.scheme;
+          }
+          target.fragment = relative.fragment;
+          return target;
+        }
+        function resolve(baseURI, relativeURI, options) {
+          var schemelessOptions = assign({ scheme: "null" }, options);
+          return serialize2(resolveComponents(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true), schemelessOptions);
+        }
+        function normalize(uri, options) {
+          if (typeof uri === "string") {
+            uri = serialize2(parse(uri, options), options);
+          } else if (typeOf(uri) === "object") {
+            uri = parse(serialize2(uri, options), options);
+          }
+          return uri;
+        }
+        function equal(uriA, uriB, options) {
+          if (typeof uriA === "string") {
+            uriA = serialize2(parse(uriA, options), options);
+          } else if (typeOf(uriA) === "object") {
+            uriA = serialize2(uriA, options);
+          }
+          if (typeof uriB === "string") {
+            uriB = serialize2(parse(uriB, options), options);
+          } else if (typeOf(uriB) === "object") {
+            uriB = serialize2(uriB, options);
+          }
+          return uriA === uriB;
+        }
+        function escapeComponent(str, options) {
+          return str && str.toString().replace(!options || !options.iri ? URI_PROTOCOL.ESCAPE : IRI_PROTOCOL.ESCAPE, pctEncChar);
+        }
+        function unescapeComponent(str, options) {
+          return str && str.toString().replace(!options || !options.iri ? URI_PROTOCOL.PCT_ENCODED : IRI_PROTOCOL.PCT_ENCODED, pctDecChars);
+        }
+        var handler = {
+          scheme: "http",
+          domainHost: true,
+          parse: function parse2(components, options) {
+            if (!components.host) {
+              components.error = components.error || "HTTP URIs must have a host.";
+            }
+            return components;
+          },
+          serialize: function serialize3(components, options) {
+            var secure = String(components.scheme).toLowerCase() === "https";
+            if (components.port === (secure ? 443 : 80) || components.port === "") {
+              components.port = void 0;
+            }
+            if (!components.path) {
+              components.path = "/";
+            }
+            return components;
+          }
+        };
+        var handler$1 = {
+          scheme: "https",
+          domainHost: handler.domainHost,
+          parse: handler.parse,
+          serialize: handler.serialize
+        };
+        function isSecure(wsComponents) {
+          return typeof wsComponents.secure === "boolean" ? wsComponents.secure : String(wsComponents.scheme).toLowerCase() === "wss";
+        }
+        var handler$2 = {
+          scheme: "ws",
+          domainHost: true,
+          parse: function parse2(components, options) {
+            var wsComponents = components;
+            wsComponents.secure = isSecure(wsComponents);
+            wsComponents.resourceName = (wsComponents.path || "/") + (wsComponents.query ? "?" + wsComponents.query : "");
+            wsComponents.path = void 0;
+            wsComponents.query = void 0;
+            return wsComponents;
+          },
+          serialize: function serialize3(wsComponents, options) {
+            if (wsComponents.port === (isSecure(wsComponents) ? 443 : 80) || wsComponents.port === "") {
+              wsComponents.port = void 0;
+            }
+            if (typeof wsComponents.secure === "boolean") {
+              wsComponents.scheme = wsComponents.secure ? "wss" : "ws";
+              wsComponents.secure = void 0;
+            }
+            if (wsComponents.resourceName) {
+              var _wsComponents$resourc = wsComponents.resourceName.split("?"), _wsComponents$resourc2 = slicedToArray(_wsComponents$resourc, 2), path = _wsComponents$resourc2[0], query = _wsComponents$resourc2[1];
+              wsComponents.path = path && path !== "/" ? path : void 0;
+              wsComponents.query = query;
+              wsComponents.resourceName = void 0;
+            }
+            wsComponents.fragment = void 0;
+            return wsComponents;
+          }
+        };
+        var handler$3 = {
+          scheme: "wss",
+          domainHost: handler$2.domainHost,
+          parse: handler$2.parse,
+          serialize: handler$2.serialize
+        };
+        var O = {};
+        var isIRI = true;
+        var UNRESERVED$$ = "[A-Za-z0-9\\-\\.\\_\\~" + (isIRI ? "\\xA0-\\u200D\\u2010-\\u2029\\u202F-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFEF" : "") + "]";
+        var HEXDIG$$ = "[0-9A-Fa-f]";
+        var PCT_ENCODED$ = subexp(subexp("%[EFef]" + HEXDIG$$ + "%" + HEXDIG$$ + HEXDIG$$ + "%" + HEXDIG$$ + HEXDIG$$) + "|" + subexp("%[89A-Fa-f]" + HEXDIG$$ + "%" + HEXDIG$$ + HEXDIG$$) + "|" + subexp("%" + HEXDIG$$ + HEXDIG$$));
+        var ATEXT$$ = "[A-Za-z0-9\\!\\$\\%\\'\\*\\+\\-\\^\\_\\`\\{\\|\\}\\~]";
+        var QTEXT$$ = "[\\!\\$\\%\\'\\(\\)\\*\\+\\,\\-\\.0-9\\<\\>A-Z\\x5E-\\x7E]";
+        var VCHAR$$ = merge(QTEXT$$, '[\\"\\\\]');
+        var SOME_DELIMS$$ = "[\\!\\$\\'\\(\\)\\*\\+\\,\\;\\:\\@]";
+        var UNRESERVED = new RegExp(UNRESERVED$$, "g");
+        var PCT_ENCODED = new RegExp(PCT_ENCODED$, "g");
+        var NOT_LOCAL_PART = new RegExp(merge("[^]", ATEXT$$, "[\\.]", '[\\"]', VCHAR$$), "g");
+        var NOT_HFNAME = new RegExp(merge("[^]", UNRESERVED$$, SOME_DELIMS$$), "g");
+        var NOT_HFVALUE = NOT_HFNAME;
+        function decodeUnreserved(str) {
+          var decStr = pctDecChars(str);
+          return !decStr.match(UNRESERVED) ? str : decStr;
+        }
+        var handler$4 = {
+          scheme: "mailto",
+          parse: function parse$$1(components, options) {
+            var mailtoComponents = components;
+            var to = mailtoComponents.to = mailtoComponents.path ? mailtoComponents.path.split(",") : [];
+            mailtoComponents.path = void 0;
+            if (mailtoComponents.query) {
+              var unknownHeaders = false;
+              var headers = {};
+              var hfields = mailtoComponents.query.split("&");
+              for (var x = 0, xl = hfields.length; x < xl; ++x) {
+                var hfield = hfields[x].split("=");
+                switch (hfield[0]) {
+                  case "to":
+                    var toAddrs = hfield[1].split(",");
+                    for (var _x = 0, _xl = toAddrs.length; _x < _xl; ++_x) {
+                      to.push(toAddrs[_x]);
+                    }
+                    break;
+                  case "subject":
+                    mailtoComponents.subject = unescapeComponent(hfield[1], options);
+                    break;
+                  case "body":
+                    mailtoComponents.body = unescapeComponent(hfield[1], options);
+                    break;
+                  default:
+                    unknownHeaders = true;
+                    headers[unescapeComponent(hfield[0], options)] = unescapeComponent(hfield[1], options);
+                    break;
+                }
+              }
+              if (unknownHeaders) mailtoComponents.headers = headers;
+            }
+            mailtoComponents.query = void 0;
+            for (var _x2 = 0, _xl2 = to.length; _x2 < _xl2; ++_x2) {
+              var addr = to[_x2].split("@");
+              addr[0] = unescapeComponent(addr[0]);
+              if (!options.unicodeSupport) {
+                try {
+                  addr[1] = punycode.toASCII(unescapeComponent(addr[1], options).toLowerCase());
+                } catch (e) {
+                  mailtoComponents.error = mailtoComponents.error || "Email address's domain name can not be converted to ASCII via punycode: " + e;
+                }
+              } else {
+                addr[1] = unescapeComponent(addr[1], options).toLowerCase();
+              }
+              to[_x2] = addr.join("@");
+            }
+            return mailtoComponents;
+          },
+          serialize: function serialize$$1(mailtoComponents, options) {
+            var components = mailtoComponents;
+            var to = toArray(mailtoComponents.to);
+            if (to) {
+              for (var x = 0, xl = to.length; x < xl; ++x) {
+                var toAddr = String(to[x]);
+                var atIdx = toAddr.lastIndexOf("@");
+                var localPart = toAddr.slice(0, atIdx).replace(PCT_ENCODED, decodeUnreserved).replace(PCT_ENCODED, toUpperCase).replace(NOT_LOCAL_PART, pctEncChar);
+                var domain = toAddr.slice(atIdx + 1);
+                try {
+                  domain = !options.iri ? punycode.toASCII(unescapeComponent(domain, options).toLowerCase()) : punycode.toUnicode(domain);
+                } catch (e) {
+                  components.error = components.error || "Email address's domain name can not be converted to " + (!options.iri ? "ASCII" : "Unicode") + " via punycode: " + e;
+                }
+                to[x] = localPart + "@" + domain;
+              }
+              components.path = to.join(",");
+            }
+            var headers = mailtoComponents.headers = mailtoComponents.headers || {};
+            if (mailtoComponents.subject) headers["subject"] = mailtoComponents.subject;
+            if (mailtoComponents.body) headers["body"] = mailtoComponents.body;
+            var fields = [];
+            for (var name in headers) {
+              if (headers[name] !== O[name]) {
+                fields.push(name.replace(PCT_ENCODED, decodeUnreserved).replace(PCT_ENCODED, toUpperCase).replace(NOT_HFNAME, pctEncChar) + "=" + headers[name].replace(PCT_ENCODED, decodeUnreserved).replace(PCT_ENCODED, toUpperCase).replace(NOT_HFVALUE, pctEncChar));
+              }
+            }
+            if (fields.length) {
+              components.query = fields.join("&");
+            }
+            return components;
+          }
+        };
+        var URN_PARSE = /^([^\:]+)\:(.*)/;
+        var handler$5 = {
+          scheme: "urn",
+          parse: function parse$$1(components, options) {
+            var matches = components.path && components.path.match(URN_PARSE);
+            var urnComponents = components;
+            if (matches) {
+              var scheme = options.scheme || urnComponents.scheme || "urn";
+              var nid = matches[1].toLowerCase();
+              var nss = matches[2];
+              var urnScheme = scheme + ":" + (options.nid || nid);
+              var schemeHandler = SCHEMES[urnScheme];
+              urnComponents.nid = nid;
+              urnComponents.nss = nss;
+              urnComponents.path = void 0;
+              if (schemeHandler) {
+                urnComponents = schemeHandler.parse(urnComponents, options);
+              }
+            } else {
+              urnComponents.error = urnComponents.error || "URN can not be parsed.";
+            }
+            return urnComponents;
+          },
+          serialize: function serialize$$1(urnComponents, options) {
+            var scheme = options.scheme || urnComponents.scheme || "urn";
+            var nid = urnComponents.nid;
+            var urnScheme = scheme + ":" + (options.nid || nid);
+            var schemeHandler = SCHEMES[urnScheme];
+            if (schemeHandler) {
+              urnComponents = schemeHandler.serialize(urnComponents, options);
+            }
+            var uriComponents2 = urnComponents;
+            var nss = urnComponents.nss;
+            uriComponents2.path = (nid || options.nid) + ":" + nss;
+            return uriComponents2;
+          }
+        };
+        var UUID = /^[0-9A-Fa-f]{8}(?:\-[0-9A-Fa-f]{4}){3}\-[0-9A-Fa-f]{12}$/;
+        var handler$6 = {
+          scheme: "urn:uuid",
+          parse: function parse2(urnComponents, options) {
+            var uuidComponents = urnComponents;
+            uuidComponents.uuid = uuidComponents.nss;
+            uuidComponents.nss = void 0;
+            if (!options.tolerant && (!uuidComponents.uuid || !uuidComponents.uuid.match(UUID))) {
+              uuidComponents.error = uuidComponents.error || "UUID is not valid.";
+            }
+            return uuidComponents;
+          },
+          serialize: function serialize3(uuidComponents, options) {
+            var urnComponents = uuidComponents;
+            urnComponents.nss = (uuidComponents.uuid || "").toLowerCase();
+            return urnComponents;
+          }
+        };
+        SCHEMES[handler.scheme] = handler;
+        SCHEMES[handler$1.scheme] = handler$1;
+        SCHEMES[handler$2.scheme] = handler$2;
+        SCHEMES[handler$3.scheme] = handler$3;
+        SCHEMES[handler$4.scheme] = handler$4;
+        SCHEMES[handler$5.scheme] = handler$5;
+        SCHEMES[handler$6.scheme] = handler$6;
+        exports2.SCHEMES = SCHEMES;
+        exports2.pctEncChar = pctEncChar;
+        exports2.pctDecChars = pctDecChars;
+        exports2.parse = parse;
+        exports2.removeDotSegments = removeDotSegments;
+        exports2.serialize = serialize2;
+        exports2.resolveComponents = resolveComponents;
+        exports2.resolve = resolve;
+        exports2.normalize = normalize;
+        exports2.equal = equal;
+        exports2.escapeComponent = escapeComponent;
+        exports2.unescapeComponent = unescapeComponent;
+        Object.defineProperty(exports2, "__esModule", { value: true });
+      }));
+    }
+  });
 
   // packages/core/src/authorization.ts
   var DEFAULT_CLIENT_NAME = "Jellyfin for IINA";
@@ -30,6 +1071,212 @@
       Accept: "application/json",
       Authorization: createMediaBrowserAuthorization(options)
     };
+  }
+
+  // packages/core/src/portable-url.ts
+  var import_uri_js = __toESM(require_uri_all(), 1);
+  function containsUrlWhitespaceOrControl(value) {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code <= 32 || code === 127) return true;
+    }
+    return false;
+  }
+  function hasValidRawAuthority(input) {
+    const authorityStart = input.indexOf("://") + 3;
+    const remainder = input.slice(authorityStart);
+    const boundary = remainder.search(/[/?#]/);
+    const authority = boundary === -1 ? remainder : remainder.slice(0, boundary);
+    if (authority.length === 0) return false;
+    const hostAndPort = authority.slice(authority.lastIndexOf("@") + 1);
+    if (hostAndPort.startsWith("[")) {
+      const closingBracket = hostAndPort.indexOf("]");
+      if (closingBracket <= 1) return false;
+      const suffix = hostAndPort.slice(closingBracket + 1);
+      if (suffix === "") return true;
+      if (!/^:\d+$/.test(suffix)) return false;
+      const port2 = Number(suffix.slice(1));
+      return Number.isInteger(port2) && port2 >= 0 && port2 <= 65535;
+    }
+    const separator = hostAndPort.lastIndexOf(":");
+    if (separator === -1) return hostAndPort.length > 0;
+    if (hostAndPort.indexOf(":") !== separator) return false;
+    const hostname = hostAndPort.slice(0, separator);
+    const portText = hostAndPort.slice(separator + 1);
+    if (hostname.length === 0 || !/^\d+$/.test(portText)) return false;
+    const port = Number(portText);
+    return Number.isInteger(port) && port >= 0 && port <= 65535;
+  }
+  function isValidIpv4(hostname) {
+    const octets = hostname.split(".");
+    return octets.length === 4 && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) >= 0 && Number(octet) <= 255);
+  }
+  function isValidIpv6(hostname) {
+    const zoneIndex = hostname.indexOf("%");
+    const address = zoneIndex === -1 ? hostname : hostname.slice(0, zoneIndex);
+    const zone = zoneIndex === -1 ? void 0 : hostname.slice(zoneIndex + 1);
+    if (zone !== void 0 && !/^[A-Za-z0-9_.-]+$/.test(zone)) return false;
+    if (!/^[0-9A-Fa-f:.]+$/.test(address) || !address.includes(":")) return false;
+    if ((address.match(/::/g) ?? []).length > 1) return false;
+    let groups = address.split(":");
+    const last = groups[groups.length - 1];
+    if (last?.includes(".")) {
+      if (!isValidIpv4(last)) return false;
+      groups = [...groups.slice(0, -1), "0", "0"];
+    }
+    const populated = groups.filter((group) => group.length > 0);
+    if (populated.some((group) => !/^[0-9A-Fa-f]{1,4}$/.test(group))) return false;
+    return address.includes("::") ? populated.length < 8 : populated.length === 8;
+  }
+  function isValidHostname(hostname) {
+    if (hostname.includes(":")) return isValidIpv6(hostname);
+    if (/^\d+(?:\.\d+){3}$/.test(hostname)) return isValidIpv4(hostname);
+    const withoutFinalDot = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+    if (withoutFinalDot.length === 0 || withoutFinalDot.length > 253) return false;
+    return withoutFinalDot.split(".").every((label) => {
+      if (label.length === 0 || label.length > 63) return false;
+      return /^[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?$/.test(label);
+    });
+  }
+  function uriComponents(value) {
+    const components = {
+      scheme: value.scheme,
+      host: value.hostname,
+      path: value.pathname
+    };
+    if (value.userinfo !== void 0) components.userinfo = value.userinfo;
+    if (value.port !== void 0) components.port = value.port;
+    if (value.query !== void 0) components.query = value.query;
+    if (value.fragment !== void 0) components.fragment = value.fragment;
+    return components;
+  }
+  function originFromComponents(components) {
+    const origin = (0, import_uri_js.serialize)({
+      scheme: components.scheme,
+      host: components.host,
+      ...components.port === void 0 ? {} : { port: components.port },
+      path: ""
+    });
+    return origin.endsWith("/") ? origin.slice(0, -1) : origin;
+  }
+  function parseAbsoluteUrl(input) {
+    if (typeof input !== "string" || input.length === 0 || containsUrlWhitespaceOrControl(input)) {
+      throw new TypeError("Invalid URL");
+    }
+    if (!/^[A-Za-z][A-Za-z\d+.-]*:\/\//.test(input)) throw new TypeError("Invalid URL");
+    if (!hasValidRawAuthority(input)) throw new TypeError("Invalid URL");
+    const normalized = (0, import_uri_js.normalize)(input);
+    const components = (0, import_uri_js.parse)(normalized);
+    if (components.error !== void 0 || components.scheme === void 0 || components.host === void 0 || components.host.length === 0 || !isValidHostname(components.host) || components.port === "") {
+      throw new TypeError("Invalid URL");
+    }
+    const port = components.port === void 0 ? void 0 : Number(components.port);
+    if (port !== void 0 && (!Number.isInteger(port) || port < 0 || port > 65535)) {
+      throw new TypeError("Invalid URL");
+    }
+    const canonical = {
+      scheme: components.scheme.toLowerCase(),
+      host: components.host.toLowerCase(),
+      path: components.path ?? ""
+    };
+    if (components.userinfo !== void 0) canonical.userinfo = components.userinfo;
+    if (port !== void 0) canonical.port = port;
+    if (components.query !== void 0) canonical.query = components.query;
+    if (components.fragment !== void 0) canonical.fragment = components.fragment;
+    const href = (0, import_uri_js.serialize)(canonical);
+    return {
+      scheme: canonical.scheme,
+      userinfo: canonical.userinfo,
+      hostname: canonical.host,
+      port,
+      pathname: canonical.path ?? "",
+      query: canonical.query,
+      fragment: canonical.fragment,
+      origin: originFromComponents(canonical),
+      href
+    };
+  }
+  function serializeAbsoluteUrl(value) {
+    return (0, import_uri_js.serialize)(uriComponents(value));
+  }
+  function encodeQueryComponent(value) {
+    let scalarValue = "";
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code >= 55296 && code <= 56319) {
+        const next = value.charCodeAt(index + 1);
+        if (next >= 56320 && next <= 57343) {
+          scalarValue += value.charAt(index) + value.charAt(index + 1);
+          index += 1;
+        } else {
+          scalarValue += "�";
+        }
+      } else if (code >= 56320 && code <= 57343) {
+        scalarValue += "�";
+      } else {
+        scalarValue += value.charAt(index);
+      }
+    }
+    return encodeURIComponent(scalarValue).replace(/%20/g, "+");
+  }
+  function decodeQueryComponent(value) {
+    try {
+      return decodeURIComponent(value.replace(/\+/g, " "));
+    } catch {
+      return value.replace(/\+/g, " ");
+    }
+  }
+  function queryEntries(query) {
+    if (query === void 0 || query.length === 0) return [];
+    return query.split("&").map((entry) => {
+      const separator = entry.indexOf("=");
+      if (separator === -1) return [decodeQueryComponent(entry), ""];
+      return [
+        decodeQueryComponent(entry.slice(0, separator)),
+        decodeQueryComponent(entry.slice(separator + 1))
+      ];
+    });
+  }
+  function isSecretQueryParameterName(name) {
+    let decoded = name;
+    for (let depth = 0; depth < 3; depth += 1) {
+      let next;
+      try {
+        next = decodeURIComponent(decoded.replace(/\+/g, " "));
+      } catch {
+        break;
+      }
+      if (next === decoded) break;
+      decoded = next;
+    }
+    const normalized = decoded.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return normalized === "apikey" || normalized === "passwd" || normalized === "pw" || normalized.endsWith("token") || normalized.endsWith("password") || normalized.endsWith("secret") || normalized.endsWith("secretkey");
+  }
+  function hasSecretQueryParameter(value) {
+    try {
+      return queryEntries(parseAbsoluteUrl(value).query).some(
+        ([name]) => isSecretQueryParameterName(name)
+      );
+    } catch {
+      return false;
+    }
+  }
+  function encodeQueryEntries(entries) {
+    return entries.map(([name, value]) => `${encodeQueryComponent(name)}=${encodeQueryComponent(value)}`).join("&");
+  }
+  function queryValueCaseInsensitive(url, name) {
+    const wanted = name.toLowerCase();
+    const parsed = (0, import_uri_js.parse)(url);
+    if (parsed.error !== void 0) return void 0;
+    return queryEntries(parsed.query).find(([entryName]) => entryName.toLowerCase() === wanted)?.[1];
+  }
+  function isAbsoluteHttpUrl(value) {
+    try {
+      const parsed = parseAbsoluteUrl(value);
+      return parsed.scheme === "http" || parsed.scheme === "https";
+    } catch {
+      return false;
+    }
   }
 
   // packages/core/src/url.ts
@@ -71,32 +1318,40 @@
     if (trimmed.length === 0) {
       throw new ServerUrlError("EMPTY_URL", "Enter a Jellyfin server URL");
     }
-    const withScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    let withScheme = trimmed;
+    if (!/^[a-z][a-z\d+.-]*:\/\//i.test(trimmed)) {
+      const localCandidate = `http://${trimmed}`;
+      try {
+        withScheme = isLocalHostname(parseAbsoluteUrl(localCandidate).hostname) ? localCandidate : `https://${trimmed}`;
+      } catch {
+        withScheme = `https://${trimmed}`;
+      }
+    }
     try {
-      return new URL(withScheme);
+      return parseAbsoluteUrl(withScheme);
     } catch {
       throw new ServerUrlError("INVALID_URL", "The Jellyfin server URL is not valid");
     }
   }
   function normalizeServerUrl(input, options = {}) {
     const parsed = parseUserSuppliedUrl(input);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    if (parsed.scheme !== "http" && parsed.scheme !== "https") {
       throw new ServerUrlError("UNSUPPORTED_PROTOCOL", "Jellyfin servers must use HTTP or HTTPS");
     }
-    if (parsed.username !== "" || parsed.password !== "") {
+    if (parsed.userinfo !== void 0) {
       throw new ServerUrlError(
         "URL_CREDENTIALS_NOT_ALLOWED",
         "Do not put credentials in the server URL"
       );
     }
-    if (parsed.search !== "" || parsed.hash !== "") {
+    if (parsed.query !== void 0 || parsed.fragment !== void 0) {
       throw new ServerUrlError(
         "URL_QUERY_NOT_ALLOWED",
         "The server URL cannot contain a query or fragment"
       );
     }
     const local = isLocalHostname(parsed.hostname);
-    if (parsed.protocol === "http:" && !local && options.allowInsecureRemote !== true) {
+    if (parsed.scheme === "http" && !local && options.allowInsecureRemote !== true) {
       throw new ServerUrlError(
         "INSECURE_REMOTE_SERVER",
         "Remote Jellyfin servers must use HTTPS unless insecure access is explicitly accepted"
@@ -105,7 +1360,7 @@
     const path = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
     const origin = parsed.origin;
     const url = `${origin}${path}`;
-    const policy = parsed.protocol === "https:" ? "https" : local ? "local-http-warning" : "remote-http-accepted";
+    const policy = parsed.scheme === "https" ? "https" : local ? "local-http-warning" : "remote-http-accepted";
     return {
       url,
       origin,
@@ -4165,9 +5420,14 @@
   // packages/core/src/contracts.ts
   var safeTicks = external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
   var identifier = external_exports.string().trim().min(1).max(256);
+  var absoluteHttpUrl = external_exports.string().refine(isAbsoluteHttpUrl, { message: "Invalid URL" });
+  var credentialSafeAbsoluteHttpUrl = absoluteHttpUrl.refine(
+    (url) => !hasSecretQueryParameter(url),
+    { message: "URL query parameters must not contain credentials" }
+  );
   var ConnectionMetadataSchema = external_exports.object({
     schemaVersion: external_exports.literal(1),
-    serverUrl: external_exports.string().url(),
+    serverUrl: absoluteHttpUrl,
     serverId: identifier,
     serverName: external_exports.string().trim().min(1).max(256),
     userId: identifier,
@@ -4193,7 +5453,7 @@
     PageSchema.extend({
       kind: external_exports.literal("library"),
       itemType: external_exports.enum(["Movie", "Series"]),
-      parentId: identifier.optional(),
+      parentId: identifier,
       sortBy: external_exports.enum(["SortName", "DateCreated", "PremiereDate", "CommunityRating"]).default("SortName"),
       sortOrder: external_exports.enum(["Ascending", "Descending"]).default("Ascending")
     }).strict(),
@@ -4230,14 +5490,14 @@
     subtitleStreamIndex: external_exports.number().int().min(-1).max(1e4).optional(),
     maxStreamingBitrate: external_exports.number().int().min(1e6).max(1e9).default(12e7),
     openInNewWindow: external_exports.boolean().default(false),
-    videoTranscodeApproved: external_exports.boolean().default(false)
+    videoTranscodeConfirmationId: identifier.optional()
   }).strict();
   var PlayMethodSchema = external_exports.enum(["DirectPlay", "DirectStream", "Transcode"]);
   var PlaybackPlanSchema = external_exports.object({
     itemId: identifier,
     playSessionId: identifier,
     mediaSourceId: identifier,
-    url: external_exports.string().url(),
+    url: credentialSafeAbsoluteHttpUrl,
     headers: external_exports.record(external_exports.string()),
     playMethod: PlayMethodSchema,
     conversion: external_exports.enum(["none", "container", "audio", "video"]),
@@ -4248,7 +5508,7 @@
     subtitleStreamIndex: external_exports.number().int().min(-1).max(1e4).optional(),
     externalSubtitle: external_exports.object({
       index: external_exports.number().int().nonnegative(),
-      deliveryUrl: external_exports.string().url(),
+      deliveryUrl: credentialSafeAbsoluteHttpUrl,
       codec: external_exports.string().optional(),
       language: external_exports.string().optional(),
       displayTitle: external_exports.string().optional()
@@ -4349,7 +5609,11 @@
   // packages/core/src/jellyfin-schemas.ts
   var identifier2 = external_exports.string().min(1).max(512);
   var shortText = external_exports.string().max(2e3);
-  var imageTags = external_exports.record(external_exports.string().max(512)).transform((value) => Object.fromEntries(Object.entries(value).slice(0, 16)));
+  var imageTags = external_exports.record(external_exports.string().max(512)).transform((value) => Object.fromEntries(Object.entries(value).slice(0, 16))).nullable();
+  var backdropImageTags = external_exports.preprocess(
+    (value) => Array.isArray(value) ? value.slice(0, 8) : value,
+    external_exports.array(external_exports.string().max(512)).max(8)
+  ).nullable();
   var PublicSystemInfoSchema = external_exports.object({
     Id: identifier2,
     ServerName: external_exports.string().min(1).max(256),
@@ -4386,6 +5650,9 @@
     Id: identifier2,
     Name: external_exports.string().max(2e3),
     Type: external_exports.string().max(128).optional(),
+    CollectionType: external_exports.string().max(128).nullable().optional(),
+    LocationType: external_exports.string().max(128).nullable().optional(),
+    IsPlaceHolder: external_exports.boolean().nullable().optional(),
     Overview: external_exports.string().max(2e4).nullable().optional(),
     RunTimeTicks: external_exports.number().int().nonnegative().nullable().optional(),
     ProductionYear: external_exports.number().int().nullable().optional(),
@@ -4398,7 +5665,7 @@
     CommunityRating: external_exports.number().finite().nullable().optional(),
     UnwatchedCount: external_exports.number().int().nonnegative().optional(),
     ImageTags: imageTags.optional(),
-    BackdropImageTags: external_exports.array(external_exports.string().max(512)).max(8).optional(),
+    BackdropImageTags: backdropImageTags.optional(),
     MediaSources: external_exports.array(PublicMediaSourceSummarySchema).max(20).optional(),
     UserData: external_exports.object({
       PlaybackPositionTicks: external_exports.number().int().nonnegative().optional(),
@@ -4448,8 +5715,11 @@
 
   // packages/core/src/bridge-results.ts
   var identifier3 = external_exports.string().trim().min(1).max(512);
+  var absoluteHttpUrl2 = external_exports.string().max(2048).refine(isAbsoluteHttpUrl, {
+    message: "Invalid URL"
+  });
   var publicConnection = external_exports.object({
-    serverUrl: external_exports.string().url().max(2048),
+    serverUrl: absoluteHttpUrl2,
     serverId: identifier3,
     serverName: external_exports.string().min(1).max(256),
     userId: identifier3,
@@ -4469,7 +5739,7 @@
   var resultSchemas = {
     "connection.probe": external_exports.object({
       server: PublicSystemInfoSchema,
-      normalizedUrl: external_exports.string().url().max(2048),
+      normalizedUrl: absoluteHttpUrl2,
       transportPolicy: external_exports.enum(["https", "local-http-warning", "remote-http-accepted"]),
       isLocal: external_exports.boolean()
     }).strict(),
@@ -4492,10 +5762,17 @@
     "artwork.fetch": external_exports.object({
       dataUrl: external_exports.string().max(12e6).regex(/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/)
     }).strict(),
-    "playback.start": external_exports.object({
-      status: external_exports.enum(["started", "confirmation-required"]),
-      plan: PublicPlaybackPlanSchema
-    }).strict(),
+    "playback.start": external_exports.discriminatedUnion("status", [
+      external_exports.object({
+        status: external_exports.literal("started"),
+        plan: PublicPlaybackPlanSchema
+      }).strict(),
+      external_exports.object({
+        status: external_exports.literal("confirmation-required"),
+        plan: PublicPlaybackPlanSchema,
+        confirmationId: identifier3
+      }).strict()
+    ]),
     "playback.stop": external_exports.object({ stopped: external_exports.literal(true) }).strict(),
     "catalog.refresh": external_exports.object({
       connection: publicConnection.optional(),
@@ -4578,25 +5855,43 @@
     };
   }
 
+  // packages/core/src/preference-contracts.ts
+  var CATALOG_OPEN_REQUEST_PREFERENCE_KEY = "catalogOpenRequestAtMs";
+
   // packages/core/src/redaction.ts
   var REDACTED = "[REDACTED]";
   var SECRET_KEY = /(?:authorization|x-emby-token|token|api[_-]?key|password|passwd|\bpw|secret)$/i;
-  var SECRET_QUERY_KEY = /^(?:api[_-]?key|access[_-]?token|token|x-emby-token|password|secret)$/i;
   function redactUrl(value) {
     try {
-      const url = new URL(value);
+      const url = parseAbsoluteUrl(value);
       let changed = false;
-      if (url.password !== "") {
-        url.password = REDACTED;
+      const passwordSeparator = url.userinfo?.indexOf(":") ?? -1;
+      if (url.userinfo !== void 0 && passwordSeparator >= 0) {
+        url.userinfo = `${url.userinfo.slice(0, passwordSeparator)}:${REDACTED}`;
         changed = true;
       }
-      for (const key of [...url.searchParams.keys()]) {
-        if (SECRET_QUERY_KEY.test(key)) {
-          url.searchParams.set(key, REDACTED);
+      let queryChanged = false;
+      const entries = queryEntries(url.query).map(([key, entryValue]) => {
+        if (isSecretQueryParameterName(key)) {
           changed = true;
+          queryChanged = true;
+          return [key, REDACTED];
         }
-      }
-      return changed ? url.toString() : void 0;
+        return [key, entryValue];
+      });
+      if (queryChanged) url.query = encodeQueryEntries(entries);
+      return changed ? serializeAbsoluteUrl(url) : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  function redactJsonDocument(value) {
+    const trimmed = value.trim();
+    if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return void 0;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed === null || typeof parsed !== "object") return void 0;
+      return JSON.stringify(redactSecrets(parsed));
     } catch {
       return void 0;
     }
@@ -4604,9 +5899,20 @@
   function redactString(value) {
     const wholeUrl = redactUrl(value);
     if (wholeUrl !== void 0) return wholeUrl;
+    const jsonDocument = redactJsonDocument(value);
+    if (jsonDocument !== void 0) return jsonDocument;
     return value.replace(
-      /([?&](?:api[_-]?key|access[_-]?token|token|x-emby-token|password|secret)=)([^&#\s]*)/gi,
+      /("(?:access[_-]?token|token|api[_-]?key|password|passwd|pw|secret)"\s*:\s*")[^"]*(")/gi,
+      `$1${REDACTED}$2`
+    ).replace(
+      /([?&](?:api[_-]?key|[a-z0-9_.-]*(?:token|password|secret(?:[_-]?key)?)|passwd|pw)=)([^&#\s]*)/gi,
       (_match, prefix) => `${prefix}${encodeURIComponent(REDACTED)}`
+    ).replace(/(MediaBrowser\s+[^\r\n]*?\bToken=\\")[^"\\]*(\\")/gi, `$1${REDACTED}$2`).replace(
+      /(\b(?:api[_-]?key|[a-z0-9_.-]*(?:token|password|secret(?:[_-]?key)?)|passwd|pw)=)("[^"]*"|'[^']*'|[^\\&#\s,;"']+)/gi,
+      (_match, prefix, secretValue) => {
+        const quote = secretValue.startsWith('"') ? '"' : secretValue.startsWith("'") ? "'" : "";
+        return `${prefix}${quote}${REDACTED}${quote}`;
+      }
     ).replace(/(MediaBrowser\s+[^\r\n]*?\bToken=")[^"]*(")/gi, `$1${REDACTED}$2`).replace(/(Bearer\s+)[^\s,]+/gi, `$1${REDACTED}`).replace(/(Authorization:\s*Basic\s+)[^\s,]+/gi, `$1${REDACTED}`);
   }
   function redactSecrets(input) {
@@ -4721,6 +6027,233 @@
     return state.lastProgressReportAtMs === void 0 || nowMs - state.lastProgressReportAtMs >= intervalMs;
   }
 
+  // packages/plugin/src/diagnostic-log.ts
+  var DIAGNOSTIC_LOG_PATH = "@data/jellyfin-diagnostics.log";
+  var PREVIOUS_DIAGNOSTIC_LOG_PATH = "@data/jellyfin-diagnostics.previous.log";
+  var MAX_DIAGNOSTIC_LOG_BYTES = 512 * 1024;
+  var MAX_PLAYER_DIAGNOSTIC_GENERATIONS = 32;
+  var PLAYER_DIAGNOSTIC_FILE_PREFIX = "jellyfin-player-diagnostics-";
+  var MAX_PLAYER_DIAGNOSTIC_ID_CHARS = 64;
+  var MAX_DIAGNOSTIC_MESSAGE_CHARS = 16 * 1024;
+  var MAX_APPEND_ATTEMPTS = 3;
+  var DEFAULT_DIAGNOSTIC_LOG_PATHS = {
+    current: DIAGNOSTIC_LOG_PATH,
+    previous: PREVIOUS_DIAGNOSTIC_LOG_PATH
+  };
+  function utf8ByteLength(value) {
+    let bytes = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code <= 127) {
+        bytes += 1;
+      } else if (code <= 2047) {
+        bytes += 2;
+      } else if (code >= 55296 && code <= 56319) {
+        const next = value.charCodeAt(index + 1);
+        if (next >= 56320 && next <= 57343) index += 1;
+        bytes += 4;
+      } else {
+        bytes += 3;
+      }
+    }
+    return bytes;
+  }
+  function scrubLocalPaths(value) {
+    return value.replace(/\/Users\/[^/\s"']+/g, "~");
+  }
+  function safeDiagnosticMessage(value) {
+    const sanitized = scrubLocalPaths(redactString(value)).replace(
+      /\bhttps?:\/\/[^\s"']+/gi,
+      "[URL_REDACTED]"
+    );
+    if (sanitized.length <= MAX_DIAGNOSTIC_MESSAGE_CHARS) return sanitized;
+    return `${sanitized.slice(0, MAX_DIAGNOSTIC_MESSAGE_CHARS)}…[TRUNCATED]`;
+  }
+  function safePlayerDiagnosticId(value) {
+    const safe = value.replace(/[^a-zA-Z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, MAX_PLAYER_DIAGNOSTIC_ID_CHARS);
+    return safe || "player";
+  }
+  function createPlayerDiagnosticLogPaths(generationId) {
+    const safeId = safePlayerDiagnosticId(generationId);
+    const base = `@data/${PLAYER_DIAGNOSTIC_FILE_PREFIX}${safeId}`;
+    return {
+      generationId: safeId,
+      current: `${base}.log`,
+      previous: `${base}.previous.log`
+    };
+  }
+  function prunePlayerDiagnosticLogs(file, currentGenerationId, maxGenerations = MAX_PLAYER_DIAGNOSTIC_GENERATIONS) {
+    try {
+      if (!Number.isSafeInteger(maxGenerations) || maxGenerations < 1) return;
+      const pattern = new RegExp(
+        `^${PLAYER_DIAGNOSTIC_FILE_PREFIX}([a-zA-Z0-9-]{1,${MAX_PLAYER_DIAGNOSTIC_ID_CHARS}})(?:\\.previous)?\\.log$`
+      );
+      const filesByGeneration = /* @__PURE__ */ new Map();
+      for (const entry of file.list("@data/", { includeSubDir: false })) {
+        if (entry.isDir) continue;
+        const match = pattern.exec(entry.filename);
+        if (!match) continue;
+        const generation = match[1];
+        if (generation === void 0) continue;
+        const paths = filesByGeneration.get(generation) ?? [];
+        paths.push(`@data/${entry.filename}`);
+        filesByGeneration.set(generation, paths);
+      }
+      const current = safePlayerDiagnosticId(currentGenerationId);
+      const newestFirst = [...filesByGeneration.keys()].sort(
+        (left, right) => right.localeCompare(left)
+      );
+      const retained = /* @__PURE__ */ new Set([current]);
+      for (const generation of newestFirst) {
+        if (retained.size >= maxGenerations) break;
+        retained.add(generation);
+      }
+      for (const [generation, paths] of filesByGeneration) {
+        if (retained.has(generation)) continue;
+        for (const path of paths) {
+          try {
+            file.delete(path);
+          } catch {
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  var PersistentDiagnosticLog = class {
+    constructor(file, onFailure = () => void 0, now = Date.now, maxBytes = MAX_DIAGNOSTIC_LOG_BYTES, paths = DEFAULT_DIAGNOSTIC_LOG_PATHS) {
+      this.file = file;
+      this.onFailure = onFailure;
+      this.now = now;
+      this.maxBytes = maxBytes;
+      this.paths = paths;
+      try {
+        this.normalizeExistingFile(this.paths.current);
+        this.normalizeExistingFile(this.paths.previous);
+      } catch {
+        this.reportFailureOnce();
+      }
+    }
+    file;
+    onFailure;
+    now;
+    maxBytes;
+    paths;
+    warnedAboutFailure = false;
+    append(level, scope, message, source) {
+      try {
+        const timestamp = new Date(this.now()).toISOString();
+        const record = {
+          timestamp,
+          level,
+          scope,
+          message: safeDiagnosticMessage(message)
+        };
+        if (source !== void 0) record.source = safeDiagnosticMessage(source).slice(0, 128);
+        const line = `${JSON.stringify(record)}
+`;
+        const lineBytes = utf8ByteLength(line);
+        this.normalizeExistingFile(this.paths.current);
+        this.normalizeExistingFile(this.paths.previous);
+        if (lineBytes > this.maxBytes) return;
+        for (let attempt = 0; attempt < MAX_APPEND_ATTEMPTS; attempt += 1) {
+          if (!this.file.exists(this.paths.current)) {
+            this.file.write(this.paths.current, "");
+          }
+          const handle = this.file.handle(this.paths.current, "write");
+          let currentSize;
+          try {
+            handle.seekToEnd();
+            currentSize = handle.offset();
+            if (Number.isSafeInteger(currentSize) && currentSize >= 0 && currentSize <= this.maxBytes && currentSize + lineBytes <= this.maxBytes) {
+              handle.write(line);
+            }
+          } finally {
+            handle.close();
+          }
+          if (!Number.isSafeInteger(currentSize) || currentSize < 0 || currentSize > this.maxBytes) {
+            this.file.write(this.paths.current, "");
+            continue;
+          }
+          if (currentSize + lineBytes > this.maxBytes) {
+            this.rotateCurrentFile();
+            continue;
+          }
+          const resultingSize = this.normalizeExistingFile(this.paths.current);
+          this.normalizeExistingFile(this.paths.previous);
+          if (resultingSize >= lineBytes) return;
+        }
+        this.normalizeExistingFile(this.paths.current);
+        this.normalizeExistingFile(this.paths.previous);
+      } catch {
+        this.reportFailureOnce();
+      }
+    }
+    reveal() {
+      try {
+        if (!this.file.exists(this.paths.current)) {
+          this.file.write(this.paths.current, "");
+        }
+        this.file.showInFinder(this.paths.current);
+      } catch {
+        this.reportFailureOnce();
+      }
+    }
+    normalizeExistingFile(path) {
+      if (!this.file.exists(path)) return 0;
+      const handle = this.file.handle(path, "read");
+      let size;
+      try {
+        handle.seekToEnd();
+        size = handle.offset();
+      } finally {
+        handle.close();
+      }
+      if (!Number.isSafeInteger(size) || size < 0 || size > this.maxBytes) {
+        this.file.write(path, "");
+        return 0;
+      }
+      return size;
+    }
+    rotateCurrentFile() {
+      const currentSize = this.normalizeExistingFile(this.paths.current);
+      let current = currentSize > 0 ? this.file.read(this.paths.current) ?? "" : "";
+      if (utf8ByteLength(current) > this.maxBytes) current = "";
+      this.file.write(this.paths.previous, current);
+      this.file.write(this.paths.current, "");
+      this.normalizeExistingFile(this.paths.previous);
+      this.normalizeExistingFile(this.paths.current);
+    }
+    reportFailureOnce() {
+      if (this.warnedAboutFailure) return;
+      this.warnedAboutFailure = true;
+      try {
+        this.onFailure("Jellyfin diagnostics could not be written to plugin-private storage.");
+      } catch {
+      }
+    }
+  };
+  function createPlayerDiagnosticSink(consoleApi, forward) {
+    const write = (level, message) => {
+      const safeMessage = safeDiagnosticMessage(message);
+      try {
+        if (level === "info") consoleApi.log(safeMessage);
+        else if (level === "warn") consoleApi.warn(safeMessage);
+        else consoleApi.error(safeMessage);
+      } catch {
+      }
+      try {
+        forward({ level, message: safeMessage });
+      } catch {
+      }
+    };
+    return {
+      log: (message) => write("info", message),
+      warn: (message) => write("warn", message),
+      error: (message) => write("error", message)
+    };
+  }
+
   // packages/plugin/src/iina-http.ts
   var JellyfinHttpError = class extends Error {
     constructor(statusCode, recoverable, message) {
@@ -4790,26 +6323,43 @@
           data: request.body !== null && typeof request.body === "object" ? request.body : {}
         });
       } catch {
+        let origin = "the configured Jellyfin server";
+        try {
+          origin = parseAbsoluteUrl(request.url).origin;
+        } catch {
+        }
         throw new JellyfinHttpError(
           0,
           true,
-          `Could not download media from ${redactString(new URL(request.url).origin)}.`
+          `Could not download media from ${redactString(origin)}.`
         );
       }
     }
   };
 
+  // packages/plugin/src/ids.ts
+  function randomHex(length) {
+    let output = "";
+    while (output.length < length) {
+      output += Math.floor(Math.random() * 65536).toString(16).padStart(4, "0");
+    }
+    return output.slice(0, length);
+  }
+  function createOpaqueId(prefix = "id") {
+    const time = Date.now().toString(36);
+    return `${prefix}-${time}-${randomHex(20)}`;
+  }
+
   // packages/plugin/src/constants.ts
-  var PLUGIN_PLAYBACK_SCHEME = "iina-jellyfin:";
   var DEFAULT_PROGRESS_INTERVAL_MS = 1e4;
   var DEFAULT_ARTWORK_LIMIT_BYTES = 8 * 1024 * 1024;
   var PLAYER_MESSAGES = {
     catalogOpen: "jellyfin.catalog.open",
     closed: "jellyfin.player.closed",
-    plan: "jellyfin.player.plan",
-    planRequest: "jellyfin.player.plan-request",
+    diagnostic: "jellyfin.player.diagnostic",
+    launch: "jellyfin.player.launch",
     playNext: "jellyfin.player.play-next",
-    replace: "jellyfin.player.replace",
+    ready: "jellyfin.player.ready",
     state: "jellyfin.player.state",
     stop: "jellyfin.player.stop",
     upNext: "jellyfin.player.up-next"
@@ -4824,16 +6374,6 @@
   };
   var MAX_EXTERNAL_SUBTITLE_BYTES = 10 * 1024 * 1024;
   var CORE_STOP_ACK_TIMEOUT_MS = 750;
-  function nonceFromPlaybackUrl(value) {
-    try {
-      const parsed = new URL(value);
-      if (parsed.protocol !== PLUGIN_PLAYBACK_SCHEME || parsed.hostname !== "play") return void 0;
-      const nonce = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
-      return nonce.length > 0 ? nonce : void 0;
-    } catch {
-      return void 0;
-    }
-  }
   function safeHeaders(headers) {
     const result = [];
     for (const [name, value] of Object.entries(headers)) {
@@ -4846,19 +6386,29 @@
     const normalized = codec?.toLowerCase();
     return normalized === "ass" || normalized === "ssa" || normalized === "vtt" ? normalized : "srt";
   }
+  function safeTemporaryNameComponent(value) {
+    const normalized = value.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 96);
+    return normalized.length > 0 ? normalized : "playback";
+  }
   function transcodeStartOffset(plan) {
     if (plan.playMethod === "DirectPlay") return 0;
     try {
-      const url = new URL(plan.url);
-      for (const [name, value] of url.searchParams) {
-        if (name.toLowerCase() === "starttimeticks") {
-          const parsed = Number(value);
-          return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
-        }
-      }
+      const value = queryValueCaseInsensitive(plan.url, "StartTimeTicks");
+      const parsed = Number(value);
+      return value !== void 0 && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
     } catch {
     }
     return 0;
+  }
+  function localStartPositionSeconds(plan) {
+    const serverStartOffset = transcodeStartOffset(plan);
+    return ticksToSeconds(Math.max(0, plan.startPositionTicks - serverStartOffset));
+  }
+  function mediaTitle(display) {
+    if (display.seriesName !== void 0 && display.seasonNumber !== void 0 && display.episodeNumber !== void 0) {
+      return `${display.seriesName} — S${String(display.seasonNumber).padStart(2, "0")}E${String(display.episodeNumber).padStart(2, "0")} — ${display.title}`;
+    }
+    return display.title;
   }
   var PlayerRuntime = class {
     constructor(api2, transport, logger2) {
@@ -4871,7 +6421,7 @@
     logger;
     session = createIdlePlaybackSession();
     launch;
-    resolvers = /* @__PURE__ */ new Map();
+    pendingLaunchesForHook = [];
     startedGeneration = -1;
     positionBaseTicks = 0;
     progressTimer;
@@ -4879,7 +6429,6 @@
     overlayReady = false;
     upNext;
     upNextTimer;
-    closedNotificationSent = false;
     externalSubtitlePath;
     reportQueue = Promise.resolve();
     controlQueue = Promise.resolve();
@@ -4887,26 +6436,20 @@
     replacementEndFilesToIgnore = 0;
     pendingCoreStopAcknowledgement;
     loadSequence = 0;
+    activeLoadReplacementSequence;
     install() {
-      this.api.global.onMessage(PLAYER_MESSAGES.plan, (raw) => this.receiveLaunch(raw));
-      this.api.global.onMessage(PLAYER_MESSAGES.replace, (raw) => {
-        const nonce = raw.nonce;
-        if (typeof nonce === "string") {
-          const sequence = ++this.replacementSequence;
-          this.invalidatePendingLoads();
-          this.enqueueControl(() => this.replace(nonce, sequence));
-        }
-      });
+      this.api.global.onMessage(PLAYER_MESSAGES.launch, (raw) => this.receiveLaunch(raw));
       this.api.global.onMessage(PLAYER_MESSAGES.stop, (raw) => {
         const requested = raw.reason;
         const reason = requested === "closed" || requested === "replaced" ? requested : "user";
         this.replacementSequence += 1;
+        this.discardPendingHandoffs();
         this.invalidatePendingLoads();
         this.enqueueControl(() => this.stop(reason, false));
       });
       this.api.global.onMessage(PLAYER_MESSAGES.upNext, (raw) => this.receiveUpNext(raw));
-      this.api.mpv.addHook("on_load", 90, (next) => {
-        void this.resolveLoad(next);
+      this.api.mpv.addHook("on_load", 90, async (next) => {
+        await this.resolveLoad(next);
       });
       this.api.event.on("iina.window-loaded", () => this.loadPlayerViews());
       this.api.event.on("iina.file-loaded", () => void this.mediaLoaded());
@@ -4916,17 +6459,15 @@
         this.handleEndFile();
       });
       this.api.event.on("iina.window-will-close", () => {
-        if (this.progressTimer !== void 0) clearInterval(this.progressTimer);
+        this.clearProgressTimer();
         this.replacementSequence += 1;
+        this.discardPendingHandoffs();
         this.invalidatePendingLoads();
         this.enqueueControl(() => this.stop("closed", true));
       });
       this.api.sidebar.onMessage("host.action", (data) => this.handleViewAction(data, "sidebar"));
       this.api.overlay.onMessage("host.action", (data) => this.handleViewAction(data, "overlay"));
-      this.progressTimer = setInterval(
-        () => void this.periodicProgress(),
-        DEFAULT_PROGRESS_INTERVAL_MS
-      );
+      this.ensureProgressTimer();
     }
     receiveLaunch(raw) {
       if (raw === null || typeof raw !== "object") return;
@@ -4942,50 +6483,70 @@
         context: candidate.context,
         display: candidate.display
       };
-      const resolver = this.resolvers.get(launch.nonce);
-      if (resolver !== void 0) {
-        this.resolvers.delete(launch.nonce);
-        resolver.resolve(launch);
+      if (typeof candidate.diagnosticCorrelation === "string" && candidate.diagnosticCorrelation.length <= 512) {
+        launch.diagnosticCorrelation = candidate.diagnosticCorrelation;
       }
-    }
-    requestLaunch(nonce) {
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.resolvers.delete(nonce);
-          reject(new Error("The Jellyfin playback plan timed out."));
-        }, 12e3);
-        this.resolvers.set(nonce, {
-          resolve: (launch) => {
-            clearTimeout(timer);
-            resolve(launch);
-          },
-          reject: (error) => {
-            clearTimeout(timer);
-            reject(error);
-          }
-        });
-        this.api.global.postMessage(PLAYER_MESSAGES.planRequest, { nonce });
-      });
+      this.ensureProgressTimer();
+      const sequence = ++this.replacementSequence;
+      this.invalidatePendingLoads();
+      this.enqueueControl(() => this.replace(launch, sequence));
     }
     async resolveLoad(next) {
       const original = this.api.mpv.getString("stream-open-filename");
-      const nonce = nonceFromPlaybackUrl(original);
-      if (nonce === void 0) {
+      if (original !== "null://") {
+        const ownedLaunch = this.launch;
+        const ownedGeneration = this.session.generation;
+        this.replacementSequence += 1;
+        this.discardPendingHandoffs();
         this.invalidatePendingLoads();
-        await this.releaseForExternalLoad();
+        try {
+          if (ownedLaunch !== void 0) await this.releaseForExternalLoad();
+        } catch (error) {
+          this.logger.warn("Could not release Jellyfin playback for an external load", error);
+        } finally {
+          if (ownedLaunch !== void 0) {
+            this.clearUpNext(true);
+            this.cleanupPlaybackIfOwned(ownedLaunch, ownedGeneration);
+          }
+          next?.();
+        }
+        return;
+      }
+      let pending;
+      while (this.pendingLaunchesForHook.length > 0) {
+        const candidate = this.pendingLaunchesForHook.shift();
+        if (candidate?.replacementSequence === this.replacementSequence) {
+          pending = candidate;
+          break;
+        }
+      }
+      if (pending === void 0) {
         next?.();
         return;
       }
       const loadSequence = this.beginLoad();
       this.deleteExternalSubtitle();
       try {
-        const launch = await this.requestLaunch(nonce);
-        if (loadSequence !== this.loadSequence) return;
+        const launch = pending.launch;
         this.launch = launch;
+        this.activeLoadReplacementSequence = pending.replacementSequence;
         this.session = beginPlaybackSession(this.session, launch.plan);
         const generation = this.session.generation;
+        this.logger.info("player.plan.received", {
+          correlation: launch.diagnosticCorrelation,
+          playMethod: launch.plan.playMethod,
+          conversion: launch.plan.conversion,
+          resume: launch.plan.startPositionTicks > 0,
+          externalSubtitle: launch.plan.externalSubtitle !== void 0,
+          selectedAudio: launch.plan.audioStreamIndex !== void 0,
+          selectedSubtitles: launch.plan.subtitleStreamIndex !== void 0
+        });
         this.positionBaseTicks = transcodeStartOffset(launch.plan);
+        this.api.mpv.set("file-local-options/resume-playback", false);
+        this.api.mpv.set("file-local-options/save-position-on-quit", false);
+        this.api.mpv.set("file-local-options/start", localStartPositionSeconds(launch.plan));
         this.api.mpv.set("http-header-fields", safeHeaders(launch.plan.headers));
+        this.api.mpv.set("file-local-options/force-media-title", mediaTitle(launch.display));
         this.api.mpv.set("stream-open-filename", launch.plan.url);
         if (launch.plan.externalSubtitle !== void 0) {
           try {
@@ -5000,25 +6561,38 @@
             this.deleteExternalSubtitle();
           }
         }
+        this.logger.info("player.media.opening", {
+          correlation: launch.diagnosticCorrelation,
+          playMethod: launch.plan.playMethod
+        });
         this.publishState();
       } catch (error) {
         if (error instanceof StalePlayerLoadError || loadSequence !== this.loadSequence) return;
         this.logger.error("Could not prepare Jellyfin playback", error);
         this.api.core.osd("Jellyfin playback could not be prepared.");
-        if (this.launch !== void 0) {
+        const failedLaunch = this.launch;
+        if (failedLaunch !== void 0) {
+          const generation = this.session.generation;
           this.session = reducePlaybackSession(this.session, {
             type: "fail",
-            generation: this.session.generation,
+            generation,
             positionTicks: this.session.positionTicks,
             message: "Jellyfin playback preparation failed."
           });
-          await this.sendReport("stopped");
-          this.publishState();
+          const report = this.sendReport("stopped");
+          try {
+            this.publishState();
+            this.api.mpv.set("stream-open-filename", "null://");
+          } finally {
+            this.cleanupPlaybackIfOwned(failedLaunch, generation);
+          }
+          await report;
+        } else {
+          this.clearMediaCredentials();
+          this.deleteExternalSubtitle();
+          this.scrubPlaybackSecrets();
+          this.api.mpv.set("stream-open-filename", "null://");
         }
-        this.clearMediaCredentials();
-        this.deleteExternalSubtitle();
-        this.scrubPlaybackSecrets();
-        this.api.mpv.set("stream-open-filename", "null://");
       } finally {
         next?.();
       }
@@ -5027,16 +6601,16 @@
       const subtitle = launch.plan.externalSubtitle;
       if (subtitle === void 0) return;
       const extension = safeSubtitleExtension(subtitle.codec);
-      const destination = `@tmp/jellyfin-subtitle-${generation}-${loadSequence}.${extension}`;
-      await this.transport.download(
-        {
-          method: "GET",
-          url: subtitle.deliveryUrl,
-          headers: launch.plan.headers
-        },
-        destination
-      );
+      const destination = `@tmp/jellyfin-subtitle-${safeTemporaryNameComponent(launch.nonce)}-${generation}-${loadSequence}.${extension}`;
       try {
+        await this.transport.download(
+          {
+            method: "GET",
+            url: subtitle.deliveryUrl,
+            headers: launch.plan.headers
+          },
+          destination
+        );
         const handle = this.api.file.handle(destination, "read");
         try {
           handle.seekToEnd();
@@ -5057,19 +6631,36 @@
     }
     async mediaLoaded() {
       if (this.launch === void 0 || this.session.status !== "preparing") return;
+      if (this.activeLoadReplacementSequence !== void 0 && this.activeLoadReplacementSequence !== this.replacementSequence) {
+        return;
+      }
       const generation = this.session.generation;
       this.clearUpNext(true);
-      const shouldSeekLocally = this.positionBaseTicks === 0 && this.launch.plan.startPositionTicks > 0;
-      if (shouldSeekLocally) {
-        this.api.core.seekTo(ticksToSeconds(this.launch.plan.startPositionTicks));
+      const requestedLocalStartSeconds = localStartPositionSeconds(this.launch.plan);
+      const loadedLocalPositionSeconds = this.api.mpv.getNumber("time-pos");
+      const shouldCorrectLoadedPosition = !Number.isFinite(loadedLocalPositionSeconds) || Math.abs(loadedLocalPositionSeconds - requestedLocalStartSeconds) > 1;
+      if (shouldCorrectLoadedPosition) {
+        this.api.core.seekTo(requestedLocalStartSeconds);
+        this.logger.info("player.position.corrected", {
+          correlation: this.launch.diagnosticCorrelation,
+          resumed: this.launch.plan.startPositionTicks > 0
+        });
       }
       this.applySelectedTracks();
       this.loadExternalSubtitleTrack();
       this.session = reducePlaybackSession(this.session, {
         type: "media-started",
         generation,
-        positionTicks: shouldSeekLocally ? Math.max(this.launch.plan.startPositionTicks, this.readPositionTicks()) : this.readPositionTicks(),
+        // The initial mpv position can still describe stale watch-later state and
+        // seekTo is asynchronous. Jellyfin's requested start is authoritative for
+        // the start report; later progress reports use mpv's live position.
+        positionTicks: this.launch.plan.startPositionTicks,
         durationTicks: this.readDurationTicks()
+      });
+      this.logger.info("player.media.loaded", {
+        correlation: this.launch.diagnosticCorrelation,
+        playMethod: this.launch.plan.playMethod,
+        resumed: this.launch.plan.startPositionTicks > 0
       });
       if (this.startedGeneration !== generation) {
         this.startedGeneration = generation;
@@ -5219,6 +6810,7 @@
       if (this.session.status !== "preparing" && this.session.status !== "playing" && this.session.status !== "paused") {
         return;
       }
+      const launch = this.launch;
       this.updatePosition();
       const generation = this.session.generation;
       if (this.session.status === "preparing") {
@@ -5228,11 +6820,13 @@
           positionTicks: this.session.positionTicks,
           message: "The Jellyfin media ended before IINA could load it."
         });
-        await this.sendReport("stopped");
-        this.publishState();
-        this.clearMediaCredentials();
-        this.deleteExternalSubtitle();
-        this.scrubPlaybackSecrets();
+        const report2 = this.sendReport("stopped");
+        try {
+          this.publishState();
+        } finally {
+          this.cleanupPlaybackIfOwned(launch, generation);
+        }
+        await report2;
         return;
       }
       const duration = this.session.durationTicks;
@@ -5247,65 +6841,84 @@
         positionTicks: this.session.positionTicks,
         reason: "user"
       });
-      await this.sendReport("stopped");
-      this.publishState();
-      this.clearMediaCredentials();
-      this.deleteExternalSubtitle();
-      this.scrubPlaybackSecrets();
+      this.logger.info("player.media.ended", {
+        correlation: this.launch.diagnosticCorrelation,
+        completed
+      });
+      const report = this.sendReport("stopped");
+      try {
+        this.publishState();
+      } finally {
+        this.cleanupPlaybackIfOwned(launch, generation);
+      }
+      await report;
     }
     async stop(reason, closing) {
-      if (closing && !this.closedNotificationSent) {
-        this.closedNotificationSent = true;
-        this.api.global.postMessage(PLAYER_MESSAGES.closed, {
-          generation: this.session.generation
-        });
-      }
+      this.discardPendingHandoffs();
       if (this.launch === void 0) {
         this.clearMediaCredentials();
         this.deleteExternalSubtitle();
         if (!closing) await this.stopCoreAndWaitForEnd();
         return;
       }
+      const launch = this.launch;
       this.updatePosition();
       const generation = this.session.generation;
       const wasActive = this.session.status === "preparing" || this.session.status === "playing" || this.session.status === "paused";
+      this.logger.info("player.stop.requested", {
+        correlation: this.launch.diagnosticCorrelation,
+        reason,
+        closing,
+        wasActive
+      });
       this.session = reducePlaybackSession(this.session, {
         type: "stop",
         generation,
         positionTicks: this.session.positionTicks,
         reason
       });
-      this.publishState();
       let endAcknowledgement;
       if (!closing) {
         endAcknowledgement = this.stopCoreAndWaitForEnd();
       }
-      if (wasActive) await this.sendReport("stopped");
-      if (endAcknowledgement !== void 0) await endAcknowledgement;
-      this.clearMediaCredentials();
-      this.deleteExternalSubtitle();
-      this.scrubPlaybackSecrets();
-    }
-    async releaseForExternalLoad() {
-      if (this.launch !== void 0) {
-        this.updatePosition();
-        const generation = this.session.generation;
-        const wasActive = this.session.status === "preparing" || this.session.status === "playing" || this.session.status === "paused";
-        if (wasActive) {
-          this.session = reducePlaybackSession(this.session, {
-            type: "stop",
-            generation,
-            positionTicks: this.session.positionTicks,
-            reason: "replaced"
-          });
-          await this.sendReport("stopped");
-          this.publishState();
-        }
+      const report = wasActive ? this.sendReport("stopped") : void 0;
+      try {
+        this.publishState();
+      } finally {
+        this.cleanupPlaybackIfOwned(launch, generation);
       }
-      this.clearUpNext(true);
-      this.clearMediaCredentials();
-      this.deleteExternalSubtitle();
-      this.scrubPlaybackSecrets();
+      if (report !== void 0) await report;
+      if (endAcknowledgement !== void 0) await endAcknowledgement;
+    }
+    releaseForExternalLoad() {
+      const launch = this.launch;
+      const generation = this.session.generation;
+      let report;
+      try {
+        if (launch !== void 0) {
+          this.updatePosition();
+          const wasActive = this.session.status === "preparing" || this.session.status === "playing" || this.session.status === "paused";
+          if (wasActive) {
+            this.session = reducePlaybackSession(this.session, {
+              type: "stop",
+              generation,
+              positionTicks: this.session.positionTicks,
+              reason: "replaced"
+            });
+            report = this.sendReport("stopped");
+            this.publishState();
+          }
+        }
+      } finally {
+        this.clearUpNext(true);
+        if (launch !== void 0) this.cleanupPlaybackIfOwned(launch, generation);
+      }
+      if (report !== void 0) {
+        void report.catch((error) => {
+          this.logger.warn("Jellyfin playback stopped report failed during an external load", error);
+        });
+      }
+      return Promise.resolve();
     }
     clearMediaCredentials() {
       this.api.mpv.set("http-header-fields", []);
@@ -5361,9 +6974,30 @@
     }
     invalidatePendingLoads() {
       this.loadSequence += 1;
-      const error = new StalePlayerLoadError();
-      for (const resolver of this.resolvers.values()) resolver.reject(error);
-      this.resolvers.clear();
+    }
+    discardPendingHandoffs() {
+      this.pendingLaunchesForHook.length = 0;
+    }
+    ensureProgressTimer() {
+      if (this.progressTimer !== void 0) return;
+      this.progressTimer = setInterval(
+        () => void this.periodicProgress(),
+        DEFAULT_PROGRESS_INTERVAL_MS
+      );
+    }
+    clearProgressTimer() {
+      if (this.progressTimer === void 0) return;
+      clearInterval(this.progressTimer);
+      this.progressTimer = void 0;
+    }
+    cleanupPlaybackIfOwned(launch, generation) {
+      if (this.launch !== launch || this.session.generation !== generation) return;
+      try {
+        this.clearMediaCredentials();
+      } finally {
+        this.deleteExternalSubtitle();
+        this.scrubPlaybackSecrets();
+      }
     }
     scrubPlaybackSecrets() {
       const current = this.session;
@@ -5380,22 +7014,34 @@
       if (current.errorMessage !== void 0) scrubbed.errorMessage = current.errorMessage;
       this.session = scrubbed;
       this.launch = void 0;
+      this.activeLoadReplacementSequence = void 0;
     }
-    async replace(nonce, sequence) {
+    async replace(launch, sequence) {
       if (sequence !== this.replacementSequence) return;
       this.clearUpNext(true);
+      const coreWasIdle = this.api.core.status.idle;
       const hadActiveMedia = this.retireForReplacement();
       if (sequence !== this.replacementSequence) return;
-      if (hadActiveMedia) this.replacementEndFilesToIgnore += 1;
+      const replaceInsideMpv = hadActiveMedia || !coreWasIdle;
+      if (replaceInsideMpv) this.replacementEndFilesToIgnore += 1;
+      const pending = { launch, replacementSequence: sequence };
+      this.pendingLaunchesForHook.push(pending);
       try {
-        this.api.core.open(`${PLUGIN_PLAYBACK_SCHEME}//play/${encodeURIComponent(nonce)}`);
+        if (replaceInsideMpv) {
+          this.api.mpv.command("loadfile", ["null://", "replace"]);
+        } else {
+          this.api.core.open("null://");
+        }
       } catch (error) {
-        if (hadActiveMedia) this.replacementEndFilesToIgnore -= 1;
+        const pendingIndex = this.pendingLaunchesForHook.indexOf(pending);
+        if (pendingIndex >= 0) this.pendingLaunchesForHook.splice(pendingIndex, 1);
+        if (replaceInsideMpv) this.replacementEndFilesToIgnore -= 1;
         throw error;
       }
     }
     retireForReplacement() {
-      if (this.launch === void 0) {
+      const launch = this.launch;
+      if (launch === void 0) {
         this.clearMediaCredentials();
         this.deleteExternalSubtitle();
         return false;
@@ -5409,11 +7055,17 @@
         positionTicks: this.session.positionTicks,
         reason: "replaced"
       });
-      this.publishState();
-      if (wasActive) void this.sendReport("stopped");
-      this.clearMediaCredentials();
-      this.deleteExternalSubtitle();
-      this.scrubPlaybackSecrets();
+      const report = wasActive ? this.sendReport("stopped") : void 0;
+      try {
+        this.publishState();
+      } finally {
+        this.cleanupPlaybackIfOwned(launch, generation);
+      }
+      if (report !== void 0) {
+        void report.catch((error) => {
+          this.logger.warn("Jellyfin playback stopped report failed during replacement", error);
+        });
+      }
       return wasActive;
     }
     publishState() {
@@ -5431,7 +7083,6 @@
         itemId: this.launch?.plan.itemId,
         stopReason: this.session.stopReason
       };
-      this.api.global.postMessage(PLAYER_MESSAGES.state, state);
       if (this.sidebarReady) this.api.sidebar.postMessage("player.state", state);
       if (this.overlayReady) this.api.overlay.postMessage("player.state", state);
     }
@@ -5501,7 +7152,8 @@
         this.publishState();
         this.publishUpNext();
       } else if (action === "window.openCatalog") {
-        this.api.global.postMessage(PLAYER_MESSAGES.catalogOpen, {});
+        this.api.preferences.set(CATALOG_OPEN_REQUEST_PREFERENCE_KEY, Date.now());
+        this.api.preferences.sync();
       } else if (action === "settings.autoplay") {
         const enabled = raw.enabled;
         if (typeof enabled === "boolean") {
@@ -5530,10 +7182,55 @@
   };
 
   // packages/plugin/src/safe-logger.ts
+  var MAX_SERIALIZED_CONTEXT_CHARS = 16 * 1024;
+  var MAX_LOG_MESSAGE_CHARS = 4 * 1024;
+  var MAX_COLLECTION_ENTRIES = 100;
+  var MAX_CONTEXT_DEPTH = 8;
+  function scrubLocalPaths2(value) {
+    return value.replace(/\/Users\/[^/\s"']+/g, "~");
+  }
+  function sanitizeMessage(message) {
+    const sanitized = scrubLocalPaths2(redactString(message));
+    if (sanitized.length <= MAX_LOG_MESSAGE_CHARS) return sanitized;
+    return `${sanitized.slice(0, MAX_LOG_MESSAGE_CHARS)}…[TRUNCATED]`;
+  }
+  function normalizeLogValue(value, seen = /* @__PURE__ */ new WeakSet(), depth = 0) {
+    if (typeof value === "string") return scrubLocalPaths2(value);
+    if (value === null || typeof value !== "object") return value;
+    if (depth >= MAX_CONTEXT_DEPTH) return "[MAX_DEPTH]";
+    if (seen.has(value)) return "[CIRCULAR]";
+    seen.add(value);
+    if (value instanceof Date) return value.toISOString();
+    if (value instanceof Error) {
+      const candidate = value;
+      const normalized = {
+        name: candidate.name,
+        message: candidate.message
+      };
+      if (typeof candidate.code === "string" || typeof candidate.code === "number") {
+        normalized.code = candidate.code;
+      }
+      if (typeof candidate.stack === "string") normalized.stack = scrubLocalPaths2(candidate.stack);
+      if (candidate.cause !== void 0) {
+        normalized.cause = normalizeLogValue(candidate.cause, seen, depth + 1);
+      }
+      return normalized;
+    }
+    if (Array.isArray(value)) {
+      return value.slice(0, MAX_COLLECTION_ENTRIES).map((item) => normalizeLogValue(item, seen, depth + 1));
+    }
+    const output = {};
+    for (const [key, item] of Object.entries(value).slice(0, MAX_COLLECTION_ENTRIES)) {
+      output[key] = normalizeLogValue(item, seen, depth + 1);
+    }
+    return output;
+  }
   function serialize(value) {
-    if (typeof value === "string") return String(redactSecrets(value));
+    if (typeof value === "string") return scrubLocalPaths2(redactString(value));
     try {
-      return JSON.stringify(redactSecrets(value));
+      const serialized = JSON.stringify(redactSecrets(normalizeLogValue(value)));
+      if (serialized.length <= MAX_SERIALIZED_CONTEXT_CHARS) return serialized;
+      return `${serialized.slice(0, MAX_SERIALIZED_CONTEXT_CHARS)}…[TRUNCATED]`;
     } catch {
       return "[unserializable]";
     }
@@ -5544,25 +7241,37 @@
     }
     sink;
     info(message, context) {
-      this.sink.log(context === void 0 ? message : `${message} ${serialize(context)}`);
+      const safeMessage = sanitizeMessage(message);
+      this.sink.log(context === void 0 ? safeMessage : `${safeMessage} ${serialize(context)}`);
     }
     warn(message, context) {
-      this.sink.warn(context === void 0 ? message : `${message} ${serialize(context)}`);
+      const safeMessage = sanitizeMessage(message);
+      this.sink.warn(context === void 0 ? safeMessage : `${safeMessage} ${serialize(context)}`);
     }
     error(message, context) {
-      this.sink.error(context === void 0 ? message : `${message} ${serialize(context)}`);
+      const safeMessage = sanitizeMessage(message);
+      this.sink.error(context === void 0 ? safeMessage : `${safeMessage} ${serialize(context)}`);
     }
   };
 
   // packages/plugin/src/index.ts
   var api = iina;
-  var logger = new SafeLogger({
-    log: (message) => api.console.log(message),
-    warn: (message) => api.console.warn(message),
-    error: (message) => api.console.error(message)
-  });
+  var diagnosticPaths = createPlayerDiagnosticLogPaths(createOpaqueId("player"));
+  var diagnostics = new PersistentDiagnosticLog(
+    api.file,
+    () => void 0,
+    Date.now,
+    MAX_DIAGNOSTIC_LOG_BYTES,
+    diagnosticPaths
+  );
+  var logger = new SafeLogger(
+    createPlayerDiagnosticSink(api.console, (record) => {
+      diagnostics.append(record.level, "player", record.message);
+    })
+  );
   var runtime = new PlayerRuntime(api, new IinaHttpTransport(api.http), logger);
   runtime.install();
   logger.info("Jellyfin player integration ready");
+  prunePlayerDiagnosticLogs(api.file, diagnosticPaths.generationId);
 })();
 //# sourceMappingURL=index.js.map

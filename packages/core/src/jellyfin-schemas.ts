@@ -4,7 +4,14 @@ const identifier = z.string().min(1).max(512);
 const shortText = z.string().max(2_000);
 const imageTags = z
   .record(z.string().max(512))
-  .transform((value) => Object.fromEntries(Object.entries(value).slice(0, 16)));
+  .transform((value) => Object.fromEntries(Object.entries(value).slice(0, 16)))
+  .nullable();
+const backdropImageTags = z
+  .preprocess(
+    (value) => (Array.isArray(value) ? value.slice(0, 8) : value),
+    z.array(z.string().max(512)).max(8),
+  )
+  .nullable();
 
 export const PublicSystemInfoSchema = z
   .object({
@@ -61,6 +68,9 @@ export const BaseItemSchema = z
     Id: identifier,
     Name: z.string().max(2_000),
     Type: z.string().max(128).optional(),
+    CollectionType: z.string().max(128).nullable().optional(),
+    LocationType: z.string().max(128).nullable().optional(),
+    IsPlaceHolder: z.boolean().nullable().optional(),
     Overview: z.string().max(20_000).nullable().optional(),
     RunTimeTicks: z.number().int().nonnegative().nullable().optional(),
     ProductionYear: z.number().int().nullable().optional(),
@@ -73,7 +83,7 @@ export const BaseItemSchema = z
     CommunityRating: z.number().finite().nullable().optional(),
     UnwatchedCount: z.number().int().nonnegative().optional(),
     ImageTags: imageTags.optional(),
-    BackdropImageTags: z.array(z.string().max(512)).max(8).optional(),
+    BackdropImageTags: backdropImageTags.optional(),
     MediaSources: z.array(PublicMediaSourceSummarySchema).max(20).optional(),
     UserData: z
       .object({

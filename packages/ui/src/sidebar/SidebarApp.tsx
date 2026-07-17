@@ -1,9 +1,8 @@
-import { FilmSlate, Pause, Play, Queue, X } from '@phosphor-icons/react';
+import { FilmSlate, Pause, Play, Queue } from '@phosphor-icons/react';
 import { useEffect, useMemo, useState } from 'react';
 import { Artwork } from '../catalog/Artwork';
 import { ProgressBar } from '../components/ProgressBar';
 import { createPlayerUiHost, type PlayerUiHost, type PlayerViewState } from './host';
-import { useUpNext } from './useUpNext';
 import './sidebar.css';
 
 export interface SidebarAppProps {
@@ -38,8 +37,6 @@ export function SidebarApp({ host: hostProp }: SidebarAppProps) {
   const [playerState, setPlayerState] = useState<PlayerViewState | undefined>(() =>
     host.getPlayerState(),
   );
-  const upNext = useUpNext(host);
-
   useEffect(() => host.subscribePlayerState(setPlayerState), [host]);
 
   const progress = useMemo(() => {
@@ -55,7 +52,6 @@ export function SidebarApp({ host: hostProp }: SidebarAppProps) {
   );
   const paused = playerState?.status === 'paused';
   const currentContext = playerState ? episodeContext(playerState) : undefined;
-  const nextContext = upNext.upNext ? episodeContext(upNext.upNext) : undefined;
 
   return (
     <main className="sidebar-shell">
@@ -114,75 +110,6 @@ export function SidebarApp({ host: hostProp }: SidebarAppProps) {
           <span>{remainingTicks > 0 ? `−${ticksToClock(remainingTicks)}` : '0:00'}</span>
         </div>
       </section>
-
-      <section className="up-next-card" aria-labelledby="up-next-title">
-        {upNext.upNext ? (
-          <>
-            <div className="up-next-heading">
-              <div>
-                <p>Up Next</p>
-                <h2 id="up-next-title">{upNext.upNext.title}</h2>
-                <span>{nextContext}</span>
-              </div>
-              {upNext.upNext.autoplay ? (
-                <strong aria-label={`${upNext.upNext.remainingSeconds} seconds remaining`}>
-                  {upNext.upNext.remainingSeconds}
-                </strong>
-              ) : null}
-            </div>
-            {upNext.upNext.artwork ? (
-              <Artwork source={upNext.upNext.artwork} alt="" className="up-next-image" />
-            ) : (
-              <span className="up-next-image player-artwork-empty" aria-hidden="true">
-                <FilmSlate size={32} weight="duotone" />
-              </span>
-            )}
-            {upNext.error ? (
-              <p className="countdown-error" role="alert">
-                {upNext.error}
-              </p>
-            ) : null}
-            <div className="up-next-actions">
-              <button
-                className="sidebar-primary-button"
-                type="button"
-                disabled={upNext.status === 'starting' || upNext.status === 'started'}
-                onClick={() => void upNext.playNow()}
-              >
-                <Play size={17} weight="fill" aria-hidden="true" />
-                {upNext.status === 'starting' ? 'Starting…' : 'Play Now'}
-              </button>
-              <button
-                className="sidebar-secondary-button"
-                type="button"
-                onClick={() => void upNext.cancel()}
-              >
-                Cancel
-              </button>
-            </div>
-          </>
-        ) : (
-          <div className="up-next-empty">
-            <p>Up Next</p>
-            <h2 id="up-next-title">
-              {upNext.cancelled ? 'Autoplay cancelled' : 'No episode queued'}
-            </h2>
-            {upNext.cancelled ? <X size={18} aria-hidden="true" /> : null}
-          </div>
-        )}
-      </section>
-
-      <label className="autoplay-setting">
-        <span>
-          <strong>Play next episode</strong>
-          <small>Start automatically when the countdown ends.</small>
-        </span>
-        <input
-          type="checkbox"
-          checked={upNext.upNext?.autoplay ?? false}
-          onChange={(event) => upNext.changeAutoplay(event.target.checked)}
-        />
-      </label>
 
       <button
         className="open-library-button"

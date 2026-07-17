@@ -2,3 +2,6 @@ dist/
 coverage/
 pnpm-lock.yaml
 design-qa.md
+AGENTS.md
+docs/SUMMARY.md
+docs/iina/

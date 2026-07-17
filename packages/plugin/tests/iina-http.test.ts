@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { IinaHttpTransport } from '../src/iina-http';
 
 const request = {
@@ -39,5 +39,24 @@ describe('IinaHttpTransport', () => {
     });
 
     await expect(transport.execute(request)).rejects.not.toThrow('do-not-log');
+  });
+
+  it('reports a safe download origin without browser URL globals', async () => {
+    const transport = new IinaHttpTransport({
+      get: async () => ({ statusCode: 500, reason: '', text: '', data: null }),
+      post: async () => ({ statusCode: 500, reason: '', text: '', data: null }),
+      download: async () => {
+        throw new Error('network failure');
+      },
+    });
+    vi.stubGlobal('URL', undefined);
+    vi.stubGlobal('URLSearchParams', undefined);
+    try {
+      await expect(transport.download(request, '/private/tmp/subtitle.srt')).rejects.toThrow(
+        'Could not download media from https://media.example.test.',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

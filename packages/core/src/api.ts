@@ -6,6 +6,7 @@ import {
   type MediaBrowserAuthorizationOptions,
 } from './authorization';
 import { createIinaDeviceProfile } from './device-profile';
+import { encodeQuery } from './portable-url';
 import { joinJellyfinPath } from './url';
 
 export interface HttpRequest<TBody = unknown> {
@@ -53,11 +54,7 @@ function withQuery(
   url: string,
   values: Record<string, string | number | boolean | undefined>,
 ): string {
-  const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(values)) {
-    if (value !== undefined) search.set(key, String(value));
-  }
-  const query = search.toString();
+  const query = encodeQuery(values);
   return query === '' ? url : `${url}?${query}`;
 }
 
@@ -70,6 +67,8 @@ function itemFields(): string {
     'PremiereDate',
     'ProductionYear',
     'RunTimeTicks',
+    'LocationType',
+    'IsPlaceHolder',
     'MediaSources',
     'MediaStreams',
     'ProviderIds',
@@ -136,6 +135,17 @@ export function buildQuickConnectAuthenticationRequest(
     url: joinJellyfinPath(serverUrl, 'Users/AuthenticateWithQuickConnect'),
     headers: jsonHeaders(identity),
     body: { Secret: secret },
+  };
+}
+
+export function buildSessionLogoutRequest(
+  context: AuthenticatedApiContext,
+): HttpRequest<Record<string, never>> {
+  return {
+    method: 'POST',
+    url: joinJellyfinPath(context.serverUrl, 'Sessions/Logout'),
+    headers: jsonHeaders(context, context.accessToken),
+    body: {},
   };
 }
 
@@ -220,6 +230,7 @@ export function buildCatalogRequest(
           SearchTerm: request.query,
           IncludeItemTypes: request.includeItemTypes.join(','),
           Recursive: true,
+          IsMissing: false,
           Fields: fields,
           ImageTypeLimit: 1,
           EnableImageTypes: 'Primary,Backdrop,Thumb',
@@ -252,6 +263,8 @@ export function buildCatalogRequest(
           {
             UserId: context.userId,
             SeasonId: request.seasonId,
+            IsMissing: false,
+            EnableUserData: true,
             Fields: fields,
             StartIndex: request.startIndex,
             Limit: request.limit,

@@ -7,6 +7,7 @@ import {
   buildPlaybackInfoRequest,
   buildPublicServerInfoRequest,
   buildQuickConnectStatusRequest,
+  buildSessionLogoutRequest,
   type AuthenticatedApiContext,
 } from '../src/api';
 import {
@@ -56,6 +57,24 @@ describe('recorded Jellyfin 10.10/10.11 contracts', () => {
     });
   });
 
+  it('accepts an observed Jellyfin catalog item with more than eight backdrops', () => {
+    const backdropTags = Array.from({ length: 12 }, (_, index) => `backdrop-${index + 1}`);
+    const observed = {
+      ...catalog1011,
+      Items: [
+        {
+          ...catalog1011.Items[0],
+          BackdropImageTags: backdropTags,
+        },
+      ],
+      TotalRecordCount: 1,
+    };
+
+    expect(ItemsResultSchema.parse(observed).Items[0]?.BackdropImageTags).toEqual(
+      backdropTags.slice(0, 8),
+    );
+  });
+
   it('accepts PlaybackInfo variants from Jellyfin 10.10 and 10.11', () => {
     expect(PlaybackInfoResponseSchema.parse(playback1010).PlaySessionId).toBe('play-session-1010');
     expect(PlaybackInfoResponseSchema.parse(playback1011).MediaSources).toHaveLength(3);
@@ -92,6 +111,18 @@ describe('authentication and catalog request builders', () => {
     expect(new URL(request.url).searchParams.get('Secret')).toBe('plugin-memory-secret');
   });
 
+  it('revokes an authenticated session without putting its token in the URL', () => {
+    const request = buildSessionLogoutRequest(context);
+
+    expect(request).toMatchObject({
+      method: 'POST',
+      url: 'https://media.example/jellyfin/Sessions/Logout',
+      body: {},
+    });
+    expect(request.headers.Authorization).toContain('Token="secret-token"');
+    expect(request.url).not.toContain('secret-token');
+  });
+
   it('builds paginated library, search, detail, and home shelf queries', () => {
     const library = buildCatalogRequest(
       CatalogRequestSchema.parse({
@@ -109,8 +140,18 @@ describe('authentication and catalog request builders', () => {
     expect(libraryUrl.pathname).toBe('/jellyfin/Users/user%2Fwith%20slash/Items');
     expect(libraryUrl.searchParams.get('ParentId')).toBe('library-1');
     expect(libraryUrl.searchParams.get('StartIndex')).toBe('100');
+    expect(libraryUrl.searchParams.get('Fields')).toContain('LocationType');
+    expect(libraryUrl.searchParams.get('Fields')).toContain('IsPlaceHolder');
     expect(libraryUrl.searchParams.get('EnableTotalRecordCount')).toBe('true');
     expect(library.headers.Authorization).toContain('Token="secret-token"');
+
+    const search = buildCatalogRequest(
+      CatalogRequestSchema.parse({ kind: 'search', query: 'Alien & Aliens' }),
+      context,
+    );
+    const searchUrl = new URL(search.url);
+    expect(searchUrl.searchParams.get('SearchTerm')).toBe('Alien & Aliens');
+    expect(searchUrl.searchParams.get('IsMissing')).toBe('false');
 
     const nextUp = buildCatalogRequest(
       CatalogRequestSchema.parse({
@@ -124,6 +165,19 @@ describe('authentication and catalog request builders', () => {
     expect(new URL(nextUp.url).pathname).toBe('/jellyfin/Shows/NextUp');
     expect(new URL(nextUp.url).searchParams.get('UserId')).toBe(context.userId);
     expect(new URL(nextUp.url).searchParams.get('SeriesId')).toBe('series-1');
+
+    const episodes = buildCatalogRequest(
+      CatalogRequestSchema.parse({
+        kind: 'episodes',
+        seriesId: 'series-1',
+        startIndex: 0,
+        limit: 200,
+      }),
+      context,
+    );
+    const episodesUrl = new URL(episodes.url);
+    expect(episodesUrl.searchParams.get('IsMissing')).toBe('false');
+    expect(episodesUrl.searchParams.get('EnableUserData')).toBe('true');
 
     const details = buildCatalogRequest(
       CatalogRequestSchema.parse({ kind: 'details', itemId: 'item/1' }),

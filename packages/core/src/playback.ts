@@ -18,9 +18,11 @@ import {
   type PlaybackInfoResponse,
 } from './jellyfin-schemas';
 import { clampPositionTicks } from './ticks';
+import { encodeQuery, hasSecretQueryParameter, queryValueCaseInsensitive } from './portable-url';
 import { joinJellyfinPath, resolveJellyfinUrl } from './url';
 
-export type PlaybackSelectionErrorCode = 'MEDIA_SOURCE_NOT_FOUND' | 'NO_PLAYABLE_URL';
+export type PlaybackSelectionErrorCode =
+  'MEDIA_SOURCE_NOT_FOUND' | 'NO_PLAYABLE_URL' | 'CREDENTIAL_QUERY_UNSAFE';
 
 export class PlaybackSelectionError extends Error {
   readonly code: PlaybackSelectionErrorCode;
@@ -30,6 +32,19 @@ export class PlaybackSelectionError extends Error {
     this.name = 'PlaybackSelectionError';
     this.code = code;
   }
+}
+
+function credentialQueryError(): PlaybackSelectionError {
+  return new PlaybackSelectionError(
+    'CREDENTIAL_QUERY_UNSAFE',
+    'Jellyfin returned a media URL containing credentials; playback was blocked to keep them out of IINA native logs',
+  );
+}
+
+function resolveSafePlaybackUrl(context: AuthenticatedApiContext, returnedUrl: string): string {
+  const resolved = resolveJellyfinUrl(context.serverUrl, returnedUrl);
+  if (hasSecretQueryParameter(resolved)) throw credentialQueryError();
+  return resolved;
 }
 
 function chooseMediaSource(response: PlaybackInfoResponse, requestedId?: string): MediaSource {
@@ -42,15 +57,6 @@ function chooseMediaSource(response: PlaybackInfoResponse, requestedId?: string)
     );
   }
   return selected;
-}
-
-function queryValueCaseInsensitive(url: string, name: string): string | undefined {
-  const parsed = new URL(url, 'https://jellyfin.invalid');
-  const wanted = name.toLowerCase();
-  for (const [key, value] of parsed.searchParams) {
-    if (key.toLowerCase() === wanted) return value;
-  }
-  return undefined;
 }
 
 function transcodeReasonsFromUrl(url: string): string[] {
@@ -69,7 +75,7 @@ function staticDirectPlayUrl(
   source: MediaSource,
   playSessionId: string,
 ): string {
-  const query = new URLSearchParams({
+  const query = encodeQuery({
     Static: 'true',
     MediaSourceId: source.Id,
     PlaySessionId: playSessionId,
@@ -177,7 +183,7 @@ export function selectPlaybackPlan(
     itemId: request.itemId,
     playSessionId: response.PlaySessionId,
     mediaSourceId: source.Id,
-    url: resolveJellyfinUrl(context.serverUrl, url),
+    url: resolveSafePlaybackUrl(context, url),
     headers: requiredHeaders(source, context),
     playMethod,
     conversion,
@@ -198,9 +204,18 @@ export function selectPlaybackPlan(
         stream.IsExternal === true,
     );
     if (subtitle?.DeliveryUrl) {
+      const deliveryUrl = resolveJellyfinUrl(context.serverUrl, subtitle.DeliveryUrl);
+      if (hasSecretQueryParameter(deliveryUrl)) {
+        // Do not make a safe Direct Play source unusable merely because
+        // Jellyfin selected an unsafe external subtitle by default. Explicit
+        // selections fail visibly; implicit defaults are disabled.
+        if (request.subtitleStreamIndex !== undefined) throw credentialQueryError();
+        delete plan.subtitleStreamIndex;
+        return PlaybackPlanSchema.parse(plan);
+      }
       const externalSubtitle: NonNullable<PlaybackPlan['externalSubtitle']> = {
         index: subtitle.Index,
-        deliveryUrl: resolveJellyfinUrl(context.serverUrl, subtitle.DeliveryUrl),
+        deliveryUrl,
       };
       if (subtitle.Codec) externalSubtitle.codec = subtitle.Codec;
       if (subtitle.Language) externalSubtitle.language = subtitle.Language;

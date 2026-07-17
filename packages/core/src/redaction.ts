@@ -1,23 +1,48 @@
+import {
+  encodeQueryEntries,
+  isSecretQueryParameterName,
+  parseAbsoluteUrl,
+  queryEntries,
+  serializeAbsoluteUrl,
+} from './portable-url';
+
 export const REDACTED = '[REDACTED]';
 
 const SECRET_KEY = /(?:authorization|x-emby-token|token|api[_-]?key|password|passwd|\bpw|secret)$/i;
-const SECRET_QUERY_KEY = /^(?:api[_-]?key|access[_-]?token|token|x-emby-token|password|secret)$/i;
 
 function redactUrl(value: string): string | undefined {
   try {
-    const url = new URL(value);
+    const url = parseAbsoluteUrl(value);
     let changed = false;
-    if (url.password !== '') {
-      url.password = REDACTED;
+    const passwordSeparator = url.userinfo?.indexOf(':') ?? -1;
+    if (url.userinfo !== undefined && passwordSeparator >= 0) {
+      url.userinfo = `${url.userinfo.slice(0, passwordSeparator)}:${REDACTED}`;
       changed = true;
     }
-    for (const key of [...url.searchParams.keys()]) {
-      if (SECRET_QUERY_KEY.test(key)) {
-        url.searchParams.set(key, REDACTED);
+    let queryChanged = false;
+    const entries = queryEntries(url.query).map(([key, entryValue]): [string, string] => {
+      if (isSecretQueryParameterName(key)) {
         changed = true;
+        queryChanged = true;
+        return [key, REDACTED];
       }
-    }
-    return changed ? url.toString() : undefined;
+      return [key, entryValue];
+    });
+    if (queryChanged) url.query = encodeQueryEntries(entries);
+    return changed ? serializeAbsoluteUrl(url) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function redactJsonDocument(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) return undefined;
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed === null || typeof parsed !== 'object') return undefined;
+    return JSON.stringify(redactSecrets(parsed));
   } catch {
     return undefined;
   }
@@ -27,10 +52,28 @@ export function redactString(value: string): string {
   const wholeUrl = redactUrl(value);
   if (wholeUrl !== undefined) return wholeUrl;
 
+  // Structured values are often serialized before reaching the logger. Parsing
+  // first exposes escaped Authorization values (Token=\"…\") to the normal
+  // recursive redactor instead of relying only on surface-level regexes.
+  const jsonDocument = redactJsonDocument(value);
+  if (jsonDocument !== undefined) return jsonDocument;
+
   return value
     .replace(
-      /([?&](?:api[_-]?key|access[_-]?token|token|x-emby-token|password|secret)=)([^&#\s]*)/gi,
+      /("(?:access[_-]?token|token|api[_-]?key|password|passwd|pw|secret)"\s*:\s*")[^"]*(")/gi,
+      `$1${REDACTED}$2`,
+    )
+    .replace(
+      /([?&](?:api[_-]?key|[a-z0-9_.-]*(?:token|password|secret(?:[_-]?key)?)|passwd|pw)=)([^&#\s]*)/gi,
       (_match, prefix: string) => `${prefix}${encodeURIComponent(REDACTED)}`,
+    )
+    .replace(/(MediaBrowser\s+[^\r\n]*?\bToken=\\")[^"\\]*(\\")/gi, `$1${REDACTED}$2`)
+    .replace(
+      /(\b(?:api[_-]?key|[a-z0-9_.-]*(?:token|password|secret(?:[_-]?key)?)|passwd|pw)=)("[^"]*"|'[^']*'|[^\\&#\s,;"']+)/gi,
+      (_match, prefix: string, secretValue: string) => {
+        const quote = secretValue.startsWith('"') ? '"' : secretValue.startsWith("'") ? "'" : '';
+        return `${prefix}${quote}${REDACTED}${quote}`;
+      },
     )
     .replace(/(MediaBrowser\s+[^\r\n]*?\bToken=")[^"]*(")/gi, `$1${REDACTED}$2`)
     .replace(/(Bearer\s+)[^\s,]+/gi, `$1${REDACTED}`)

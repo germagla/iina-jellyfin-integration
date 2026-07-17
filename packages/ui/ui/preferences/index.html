@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Jellyfin for IINA Preferences</title>
+    <link rel="stylesheet" href="/src/preferences/preferences.css" />
+  </head>
+  <body>
+    <section class="pref-section library-section" aria-labelledby="library-heading">
+      <div>
+        <h2 id="library-heading">Jellyfin Library</h2>
+        <p class="small secondary pref-help">
+          Connect, browse, and manage your Jellyfin account in the standalone library window. You
+          can also open it from IINA’s Plugins menu or press ⌥⌘J from any focused IINA window.
+        </p>
+      </div>
+      <button type="button" class="primary-action" data-open-catalog>Open Jellyfin Library</button>
+      <p class="small status" data-open-status role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="pref-section diagnostics-section" aria-labelledby="diagnostics-heading">
+      <div>
+        <h2 id="diagnostics-heading">Diagnostics</h2>
+        <p class="small secondary pref-help">
+          Jellyfin for IINA keeps a small rotating, redacted local log to make playback problems
+          easier to investigate. Authentication secrets and media URLs are never recorded.
+        </p>
+      </div>
+      <button type="button" data-reveal-diagnostics>Reveal Diagnostic Log</button>
+      <p class="small status" data-diagnostics-status role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="pref-section privacy-section" aria-labelledby="privacy-heading">
+      <h2 id="privacy-heading">Connection and Privacy</h2>
+      <p class="small secondary pref-help">
+        Server and account changes are made in the Jellyfin Library. Access tokens are stored in
+        macOS Keychain and are never exposed to this preferences page.
+      </p>
+    </section>
+
+    <script type="module" src="/src/preferences-main.ts"></script>
+  </body>
+</html>

@@ -14,13 +14,17 @@ describe('bridge contracts', () => {
     const request = parseBridgeRequest({
       operation: 'catalog.query',
       requestId: 'request-1',
-      payload: { kind: 'library', itemType: 'Movie' },
+      payload: { kind: 'library', itemType: 'Movie', parentId: 'library-1' },
     });
 
     expect(request.operation).toBe('catalog.query');
     if (request.operation === 'catalog.query' && request.payload.kind === 'library') {
       expect(request.payload).toMatchObject({ startIndex: 0, limit: 50, sortBy: 'SortName' });
     }
+  });
+
+  it('requires every library query to be scoped to a Jellyfin view', () => {
+    expect(() => CatalogRequestSchema.parse({ kind: 'library', itemType: 'Movie' })).toThrow();
   });
 
   it('rejects unknown operations and unknown payload properties', () => {
@@ -83,14 +87,45 @@ describe('bridge contracts', () => {
       startPositionTicks: 0,
       maxStreamingBitrate: 120_000_000,
       openInNewWindow: false,
-      videoTranscodeApproved: false,
     });
+    expect(() =>
+      PlaybackRequestSchema.parse({ itemId: 'movie-1', videoTranscodeApproved: true }),
+    ).toThrow();
+    expect(
+      PlaybackRequestSchema.parse({
+        itemId: 'movie-1',
+        videoTranscodeConfirmationId: 'confirmation-1',
+      }),
+    ).toMatchObject({ videoTranscodeConfirmationId: 'confirmation-1' });
+  });
+
+  it('requires an opaque permit on video-transcode confirmation results', () => {
+    const plan = {
+      playMethod: 'Transcode',
+      conversion: 'video',
+      requiresVideoTranscodeConfirmation: true,
+      transcodeReasons: ['VideoCodecNotSupported'],
+      mediaSourceId: 'source-1',
+    };
+
+    expect(() =>
+      parseBridgeResult('playback.start', { status: 'confirmation-required', plan }),
+    ).toThrow();
+    expect(
+      parseBridgeResult('playback.start', {
+        status: 'confirmation-required',
+        confirmationId: 'confirmation-1',
+        plan,
+      }),
+    ).toMatchObject({ confirmationId: 'confirmation-1' });
   });
 
   it('strips hostile Jellyfin fields from catalog results before they cross the webview bridge', () => {
+    const backdropTags = Array.from({ length: 12 }, (_, index) => `backdrop-${index + 1}`);
     const result = parseBridgeResult('catalog.query', {
       Id: 'movie-1',
       Name: '<img src=x onerror=alert(1)>',
+      BackdropImageTags: backdropTags,
       Path: '/private/media/movie.mkv',
       AccessToken: 'must-not-cross',
       MediaSources: [
@@ -107,6 +142,7 @@ describe('bridge contracts', () => {
     expect(result).toEqual({
       Id: 'movie-1',
       Name: '<img src=x onerror=alert(1)>',
+      BackdropImageTags: backdropTags.slice(0, 8),
       MediaSources: [
         {
           Id: 'source-1',

@@ -4,6 +4,7 @@ import type {
   MediaVersionChoice,
   SeasonChoice,
   ShowDetails,
+  SupportedLibrary,
   TrackChoice,
 } from './contracts';
 
@@ -108,6 +109,33 @@ export function mediaCardsFromResult(value: unknown): {
   return { items, total: value.TotalRecordCount, startIndex: value.StartIndex };
 }
 
+export function supportedLibrariesFromResult(value: unknown): SupportedLibrary[] {
+  if (!isItemsResult(value)) throw new Error('Jellyfin returned an invalid library list.');
+
+  const seenIds = new Set<string>();
+  return value.Items.flatMap((value) => {
+    const item = record(value);
+    const id = stringValue(item?.Id);
+    const rawName = stringValue(item?.Name);
+    const name = rawName?.trim();
+    const collectionType = stringValue(item?.CollectionType);
+    const kind =
+      collectionType === 'movies' ? 'movie' : collectionType === 'tvshows' ? 'series' : undefined;
+    if (
+      !id ||
+      id.length > 256 ||
+      id.trim() !== id ||
+      !name ||
+      name.length > 256 ||
+      !kind ||
+      seenIds.has(id)
+    )
+      return [];
+    seenIds.add(id);
+    return [{ id, name, kind }];
+  });
+}
+
 function trackChoices(streams: unknown[], type: 'Audio' | 'Subtitle'): TrackChoice[] {
   return streams.flatMap((value) => {
     const stream = record(value);
@@ -190,25 +218,35 @@ export function showDetailsFromResult(value: unknown): ShowDetails {
   if (!item || !id || !name) throw new Error('Jellyfin returned invalid item details.');
 
   const runtimeMinutes = ticksToMinutes(item.RunTimeTicks) ?? 0;
-  const progress = progressFromItem(item) ?? 0;
+  const itemType = stringValue(item.Type);
+  const kind = itemType === 'Movie' ? 'movie' : itemType === 'Episode' ? 'episode' : 'series';
+  const locationType = stringValue(item.LocationType);
+  const playable =
+    (kind === 'movie' || kind === 'episode') &&
+    item.IsPlaceHolder !== true &&
+    locationType !== 'Virtual' &&
+    locationType !== 'Offline';
+  const progress = playable ? (progressFromItem(item) ?? 0) : 0;
   const remaining = Math.max(0, Math.round(runtimeMinutes * (1 - progress)));
-  const versions = mediaVersionsFromItem(item);
+  const versions = playable ? mediaVersionsFromItem(item) : [];
   const backdropTags = Array.isArray(item.BackdropImageTags) ? item.BackdropImageTags : [];
-  const playbackPositionTicks = playbackPositionTicksFromItem(item) ?? 0;
+  const playbackPositionTicks = playable ? (playbackPositionTicksFromItem(item) ?? 0) : 0;
   const seasonNumber = numberValue(item.ParentIndexNumber);
 
   return {
     id,
-    seriesId: stringValue(item.SeriesId) ?? (stringValue(item.Type) === 'Series' ? id : undefined),
+    kind,
+    playable,
+    seriesId: stringValue(item.SeriesId) ?? (itemType === 'Series' ? id : undefined),
     title: stringValue(item.SeriesName) ?? name,
     episodeTitle: name,
     episodeLabel:
       numberValue(item.ParentIndexNumber) !== undefined &&
       numberValue(item.IndexNumber) !== undefined
         ? `S${numberValue(item.ParentIndexNumber)} · E${numberValue(item.IndexNumber)}`
-        : stringValue(item.Type) === 'Movie'
+        : itemType === 'Movie'
           ? 'Movie'
-          : stringValue(item.Type) === 'Series'
+          : itemType === 'Series'
             ? 'Series'
             : 'Episode',
     overview: stringValue(item.Overview) ?? 'No overview is available.',
@@ -241,6 +279,8 @@ function isShowDetails(value: unknown): value is ShowDetails {
   const candidate = record(value);
   return (
     typeof candidate?.id === 'string' &&
+    (candidate.kind === 'movie' || candidate.kind === 'series' || candidate.kind === 'episode') &&
+    typeof candidate.playable === 'boolean' &&
     typeof candidate.title === 'string' &&
     typeof candidate.overview === 'string' &&
     Array.isArray(candidate.episodes) &&
@@ -258,6 +298,11 @@ export function episodesFromResult(value: unknown): EpisodeDetails[] {
         })();
   return values.flatMap((value) => {
     const raw = record(value);
+    if (raw?.Type !== 'Episode') return [];
+    const locationType = stringValue(raw?.LocationType);
+    if (raw?.IsPlaceHolder === true || locationType === 'Virtual' || locationType === 'Offline') {
+      return [];
+    }
     const item = mediaCardFromItem(value);
     if (!raw || !item) return [];
     return [

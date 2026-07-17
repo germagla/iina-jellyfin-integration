@@ -11,7 +11,17 @@
     <title>Jellyfin for IINA</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="connection-screen" data-catalog-fallback>
+        <section class="connection-card" aria-labelledby="catalog-loading-title">
+          <p class="connection-eyebrow">Jellyfin for IINA</p>
+          <h1 id="catalog-loading-title">Opening your library…</h1>
+          <p class="connection-intro">
+            If this message remains visible, reload the window or restart IINA.
+          </p>
+        </section>
+      </main>
+    </div>
     <script type="module" src="/src/catalog-main.tsx"></script>
   </body>
 </html>

@@ -1,11 +1,11 @@
 import { SpinnerGap } from '@phosphor-icons/react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type {
   CatalogBridge,
   EpisodeDetails,
   MediaCard,
-  PlaybackConfirmationNotice,
   ShowDetails,
+  SupportedLibrary,
 } from '../bridge/contracts';
 import { createCatalogBridge } from '../bridge/client';
 import {
@@ -13,13 +13,18 @@ import {
   isItemsResult,
   seasonsFromEpisodes,
   showDetailsFromResult,
+  supportedLibrariesFromResult,
 } from '../bridge/adapters';
-import { AppChrome, type CatalogRoute } from './Chrome';
+import { AppChrome, type CatalogReturnRoute, type CatalogRoute } from './Chrome';
 import { ConnectionScreen } from './ConnectionScreen';
 import { DetailsScreen } from './DetailsScreen';
 import { GridScreen, HomeScreen, SearchScreen } from './LibraryScreens';
 import { type DemoSurfaceState, ErrorState } from './SurfaceState';
+import { useCatalogRefreshCoordinator } from './useCatalogRefreshCoordinator';
 import './catalog.css';
+
+const MAX_SERIES_EPISODES = 5_000;
+const MAX_SERIES_EPISODE_PAGES = 25;
 
 export interface CatalogAppProps {
   bridge?: CatalogBridge;
@@ -35,9 +40,12 @@ function DetailsLoader({
   demoState,
   refreshKey,
   showOverride,
-  playbackConfirmation,
-  onConfirmationPresented,
+  libraries,
+  selectedLibraryId,
+  activeRoute,
   onNavigate,
+  onSelectLibrary,
+  onBack,
   onDisconnect,
 }: {
   bridge: CatalogBridge;
@@ -45,9 +53,12 @@ function DetailsLoader({
   demoState: DemoSurfaceState;
   refreshKey: number;
   showOverride?: ShowDetails;
-  playbackConfirmation?: PlaybackConfirmationNotice;
-  onConfirmationPresented: () => void;
+  libraries: SupportedLibrary[];
+  selectedLibraryId?: string;
+  activeRoute: CatalogReturnRoute;
   onNavigate: (route: CatalogRoute) => void;
+  onSelectLibrary: (libraryId: string) => void;
+  onBack: () => void;
   onDisconnect: () => void;
 }) {
   const [show, setShow] = useState<ShowDetails | undefined>(showOverride);
@@ -92,19 +103,25 @@ function DetailsLoader({
           const episodes: EpisodeDetails[] = [];
           let startIndex = 0;
           let total = Number.POSITIVE_INFINITY;
-          while (startIndex < total) {
+          let pages = 0;
+          while (
+            startIndex < total &&
+            episodes.length < MAX_SERIES_EPISODES &&
+            pages < MAX_SERIES_EPISODE_PAGES
+          ) {
+            pages += 1;
             const episodeResult = await bridge.request('catalog.query', {
               kind: 'episodes',
               seriesId: details.seriesId,
               startIndex,
-              limit: 200,
+              limit: Math.min(200, MAX_SERIES_EPISODES - episodes.length),
             });
             if (!active) return;
             if (isItemsResult(episodeResult) && episodeResult.StartIndex < startIndex) break;
             const page = episodesFromResult(episodeResult);
             episodes.push(...page);
             if (!isItemsResult(episodeResult) || episodeResult.Items.length === 0) break;
-            total = episodeResult.TotalRecordCount;
+            total = Math.min(episodeResult.TotalRecordCount, MAX_SERIES_EPISODES);
             startIndex = episodeResult.StartIndex + episodeResult.Items.length;
           }
           details.episodes = episodes;
@@ -128,16 +145,28 @@ function DetailsLoader({
         key={show.id}
         bridge={bridge}
         show={show}
-        playbackConfirmation={playbackConfirmation}
-        onConfirmationPresented={onConfirmationPresented}
+        libraries={libraries}
+        selectedLibraryId={selectedLibraryId}
+        activeRoute={activeRoute}
         onNavigate={onNavigate}
+        onSelectLibrary={onSelectLibrary}
+        onBack={onBack}
         onDisconnect={onDisconnect}
       />
     );
 
   return (
     <main className="details-loading-shell">
-      <AppChrome route="details" onNavigate={onNavigate} onDisconnect={onDisconnect} translucent />
+      <AppChrome
+        route="details"
+        libraries={libraries}
+        selectedLibraryId={selectedLibraryId}
+        activeRoute={activeRoute}
+        onNavigate={onNavigate}
+        onSelectLibrary={onSelectLibrary}
+        onDisconnect={onDisconnect}
+        translucent
+      />
       {error ? (
         <ErrorState message={error} onRetry={() => setRetry((value) => value + 1)} />
       ) : (
@@ -160,11 +189,22 @@ export function CatalogApp({
   const [bridge] = useState(() => bridgeProp ?? createCatalogBridge());
   const [connected, setConnected] = useState<boolean | undefined>(initialConnected);
   const [route, setRoute] = useState<CatalogRoute>(initialRoute);
+  const [detailsReturnRoute, setDetailsReturnRoute] = useState<CatalogReturnRoute>('home');
+  const [libraries, setLibraries] = useState<SupportedLibrary[]>([]);
+  const [librariesLoaded, setLibrariesLoaded] = useState(false);
+  const [librariesError, setLibrariesError] = useState<string>();
+  const [selectedLibraryId, setSelectedLibraryId] = useState<string>();
   const [selectedItemId, setSelectedItemId] = useState('horizons');
+  const catalogScrollPosition = useRef(0);
+  const restoreCatalogScroll = useRef(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [playbackConfirmation, setPlaybackConfirmation] = useState<
-    PlaybackConfirmationNotice | undefined
-  >();
+  const [disconnectError, setDisconnectError] = useState<string>();
+
+  useCatalogRefreshCoordinator({
+    bridge,
+    enabled: connected === true,
+    onRefresh: () => setRefreshKey((value) => value + 1),
+  });
 
   useEffect(() => {
     if (initialConnected !== undefined) return;
@@ -183,57 +223,108 @@ export function CatalogApp({
   }, [bridge, initialConnected]);
 
   useEffect(() => {
-    return bridge.subscribeInvalidation?.(() => {
-      if (document.visibilityState === 'hidden') return;
-      setRefreshKey((value) => value + 1);
-    });
-  }, [bridge]);
+    if (!connected) {
+      setLibraries([]);
+      setLibrariesLoaded(false);
+      setLibrariesError(undefined);
+      setSelectedLibraryId(undefined);
+      return;
+    }
 
-  useEffect(() => {
-    return bridge.subscribePlaybackConfirmation?.((notice) => {
-      setSelectedItemId(notice.itemId);
-      setPlaybackConfirmation(notice);
-      setRoute('details');
-    });
-  }, [bridge]);
+    let active = true;
+    setLibrariesError(undefined);
+    void bridge
+      .request('catalog.query', { kind: 'libraries' })
+      .then((result) => {
+        if (!active) return;
+        const nextLibraries = supportedLibrariesFromResult(result);
+        setLibraries(nextLibraries);
+        setSelectedLibraryId((current) =>
+          current && nextLibraries.some((library) => library.id === current)
+            ? current
+            : nextLibraries[0]?.id,
+        );
+        setLibrariesLoaded(true);
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setLibrariesError(
+          reason instanceof Error ? reason.message : 'Jellyfin libraries could not be loaded.',
+        );
+        setLibrariesLoaded(true);
+      });
 
-  useEffect(() => {
-    if (!connected) return;
-    let latestRefresh = 0;
-    const refreshVisibleData = () => {
-      const now = Date.now();
-      if (now - latestRefresh < 5_000 || document.visibilityState === 'hidden') return;
-      latestRefresh = now;
-      void bridge
-        .request('catalog.refresh', {})
-        .then(() => {
-          setRefreshKey((value) => value + 1);
-        })
-        .catch(() => undefined);
-    };
-    const timer = window.setInterval(refreshVisibleData, 60_000);
-    window.addEventListener('focus', refreshVisibleData);
-    document.addEventListener('visibilitychange', refreshVisibleData);
     return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', refreshVisibleData);
-      document.removeEventListener('visibilitychange', refreshVisibleData);
+      active = false;
     };
-  }, [bridge, connected, route]);
+  }, [bridge, connected, refreshKey]);
+
+  useEffect(() => {
+    if (!librariesLoaded) return;
+    if (selectedLibraryId && libraries.some((library) => library.id === selectedLibraryId)) return;
+    setSelectedLibraryId(libraries[0]?.id);
+    if (route === 'library' && libraries.length === 0) setRoute('home');
+  }, [libraries, librariesLoaded, route, selectedLibraryId]);
+
+  useLayoutEffect(() => {
+    if (route === 'details') {
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+      return;
+    }
+    if (!restoreCatalogScroll.current) return;
+    restoreCatalogScroll.current = false;
+    document.documentElement.scrollTop = catalogScrollPosition.current;
+    document.body.scrollTop = catalogScrollPosition.current;
+  }, [route]);
 
   const disconnect = useCallback(() => {
-    void bridge.request('connection.disconnect', {}).finally(() => {
-      setConnected(false);
-      setPlaybackConfirmation(undefined);
-      setRoute('home');
-    });
+    setDisconnectError(undefined);
+    void bridge
+      .request('connection.disconnect', {})
+      .then(() => {
+        setConnected(false);
+        setLibraries([]);
+        setSelectedLibraryId(undefined);
+        setRoute('home');
+      })
+      .catch((reason: unknown) => {
+        setDisconnectError(
+          reason instanceof Error ? reason.message : 'Jellyfin could not be disconnected safely.',
+        );
+      });
   }, [bridge]);
 
-  const selectItem = useCallback((item: MediaCard) => {
-    setSelectedItemId(item.id);
-    setRoute('details');
+  const navigate = useCallback((destination: CatalogRoute) => {
+    restoreCatalogScroll.current = false;
+    setRoute(destination);
   }, []);
-  const clearPlaybackConfirmation = useCallback(() => setPlaybackConfirmation(undefined), []);
+  const selectLibrary = useCallback(
+    (libraryId: string) => {
+      if (!libraries.some((library) => library.id === libraryId)) return;
+      restoreCatalogScroll.current = false;
+      setSelectedLibraryId(libraryId);
+      setRoute('library');
+    },
+    [libraries],
+  );
+  const selectItem = useCallback(
+    (item: MediaCard) => {
+      catalogScrollPosition.current = Math.max(
+        document.documentElement.scrollTop,
+        document.body.scrollTop,
+      );
+      setDetailsReturnRoute(route === 'details' ? detailsReturnRoute : route);
+      setSelectedItemId(item.id);
+      setRoute('details');
+    },
+    [detailsReturnRoute, route],
+  );
+  const returnToCatalog = useCallback(() => {
+    restoreCatalogScroll.current = true;
+    setRoute(detailsReturnRoute);
+  }, [detailsReturnRoute]);
+  const selectedLibrary = libraries.find((library) => library.id === selectedLibraryId);
 
   if (connected === undefined) {
     return (
@@ -256,61 +347,80 @@ export function CatalogApp({
     );
   }
 
-  if (route === 'details') {
-    return (
-      <DetailsLoader
-        bridge={bridge}
-        itemId={selectedItemId}
-        demoState={demoState}
-        refreshKey={refreshKey}
-        showOverride={showOverride}
-        playbackConfirmation={playbackConfirmation}
-        onConfirmationPresented={clearPlaybackConfirmation}
-        onNavigate={setRoute}
-        onDisconnect={disconnect}
-      />
-    );
-  }
+  const visibleCatalogRoute: CatalogReturnRoute = route === 'details' ? detailsReturnRoute : route;
 
   return (
-    <div className="catalog-shell">
-      <AppChrome route={route} onNavigate={setRoute} onDisconnect={disconnect} />
-      <main className="catalog-main">
-        {route === 'home' ? (
-          <HomeScreen
-            bridge={bridge}
-            demoState={demoState}
-            refreshKey={refreshKey}
-            onSelect={selectItem}
-          />
-        ) : null}
-        {route === 'movies' ? (
-          <GridScreen
-            bridge={bridge}
-            demoState={demoState}
-            refreshKey={refreshKey}
-            onSelect={selectItem}
-            kind="movie"
-          />
-        ) : null}
-        {route === 'shows' ? (
-          <GridScreen
-            bridge={bridge}
-            demoState={demoState}
-            refreshKey={refreshKey}
-            onSelect={selectItem}
-            kind="series"
-          />
-        ) : null}
-        {route === 'search' ? (
-          <SearchScreen
-            bridge={bridge}
-            demoState={demoState}
-            refreshKey={refreshKey}
-            onSelect={selectItem}
-          />
-        ) : null}
-      </main>
-    </div>
+    <>
+      {disconnectError ? (
+        <p className="catalog-global-error" role="alert">
+          {disconnectError}
+        </p>
+      ) : null}
+      {librariesError && route !== 'details' ? (
+        <p className="catalog-global-error" role="alert">
+          Libraries could not be refreshed: {librariesError}
+        </p>
+      ) : null}
+      <div className="catalog-shell" hidden={route === 'details'}>
+        <AppChrome
+          route={visibleCatalogRoute}
+          libraries={libraries}
+          selectedLibraryId={selectedLibraryId}
+          onNavigate={navigate}
+          onSelectLibrary={selectLibrary}
+          onDisconnect={disconnect}
+        />
+        <main className="catalog-main">
+          {visibleCatalogRoute === 'home' ? (
+            <HomeScreen
+              bridge={bridge}
+              demoState={demoState}
+              refreshKey={refreshKey}
+              onSelect={selectItem}
+            />
+          ) : null}
+          {visibleCatalogRoute === 'library' && selectedLibrary ? (
+            <GridScreen
+              key={selectedLibrary.id}
+              bridge={bridge}
+              demoState={demoState}
+              refreshKey={refreshKey}
+              onSelect={selectItem}
+              library={selectedLibrary}
+            />
+          ) : null}
+          {visibleCatalogRoute === 'library' && !selectedLibrary && !librariesLoaded ? (
+            <div className="details-loading" aria-busy="true" aria-label="Loading libraries">
+              <SpinnerGap className="spin" size={28} aria-hidden="true" />
+              <span>Loading libraries…</span>
+            </div>
+          ) : null}
+          {visibleCatalogRoute === 'search' ? (
+            <SearchScreen
+              bridge={bridge}
+              demoState={demoState}
+              refreshKey={refreshKey}
+              onSelect={selectItem}
+            />
+          ) : null}
+        </main>
+      </div>
+      {route === 'details' ? (
+        <DetailsLoader
+          bridge={bridge}
+          itemId={selectedItemId}
+          demoState={demoState}
+          refreshKey={refreshKey}
+          showOverride={showOverride}
+          libraries={libraries}
+          selectedLibraryId={selectedLibraryId}
+          activeRoute={detailsReturnRoute}
+          onNavigate={navigate}
+          onSelectLibrary={selectLibrary}
+          onBack={returnToCatalog}
+          onDisconnect={disconnect}
+        />
+      ) : null}
+    </>
   );
 }

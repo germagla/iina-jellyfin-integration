@@ -1,5 +1,5 @@
 import type { HttpRequest } from '@iina-jellyfin/core';
-import { redactString } from '@iina-jellyfin/core';
+import { parseAbsoluteUrl, redactString } from '@iina-jellyfin/core';
 
 export interface IinaHttpResponse<T = unknown> {
   text: string;
@@ -99,10 +99,16 @@ export class IinaHttpTransport {
             : {},
       });
     } catch {
+      let origin = 'the configured Jellyfin server';
+      try {
+        origin = parseAbsoluteUrl(request.url).origin;
+      } catch {
+        // Request construction already validates URLs; keep the fallback non-sensitive.
+      }
       throw new JellyfinHttpError(
         0,
         true,
-        `Could not download media from ${redactString(new URL(request.url).origin)}.`,
+        `Could not download media from ${redactString(origin)}.`,
       );
     }
   }

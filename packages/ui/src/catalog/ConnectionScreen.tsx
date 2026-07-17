@@ -6,6 +6,7 @@ import {
   SpinnerGap,
   X,
 } from '@phosphor-icons/react';
+import { normalizeServerUrl, type NormalizedServerAddress } from '@iina-jellyfin/core';
 import { useEffect, useState } from 'react';
 import type { CatalogBridge } from '../bridge/contracts';
 
@@ -16,60 +17,48 @@ interface ConnectionScreenProps {
 
 type AuthMode = 'password' | 'quick-connect';
 
-function isLocalHostname(hostname: string): boolean {
-  const value = hostname.toLocaleLowerCase().replace(/^\[|\]$/g, '');
-  if (value === 'localhost' || value === '::1' || value.endsWith('.local')) return true;
-  if (/^127\./.test(value) || /^10\./.test(value) || /^192\.168\./.test(value)) return true;
-  const match = /^172\.(\d{1,3})\./.exec(value);
-  return match !== null && Number(match[1]) >= 16 && Number(match[1]) <= 31;
+interface PendingInsecureAuth {
+  mode: AuthMode;
+  serverUrl: string;
 }
 
-export function isInsecureRemoteServer(serverUrl: string): boolean {
+export const DEFAULT_JELLYFIN_SERVER_URL = 'http://localhost:8096';
+
+function inspectServerUrl(serverUrl: string): NormalizedServerAddress | undefined {
   try {
-    const url = new URL(serverUrl);
-    return url.protocol === 'http:' && !isLocalHostname(url.hostname);
+    return normalizeServerUrl(serverUrl, { allowInsecureRemote: true });
   } catch {
-    return false;
-  }
-}
-
-export function isInsecureLocalServer(serverUrl: string): boolean {
-  try {
-    const url = new URL(serverUrl);
-    return url.protocol === 'http:' && isLocalHostname(url.hostname);
-  } catch {
-    return false;
-  }
-}
-
-function validateServerUrl(serverUrl: string): string | undefined {
-  try {
-    const parsed = new URL(serverUrl);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
-      return 'Use an http:// or https:// Jellyfin address.';
-    if (parsed.username || parsed.password)
-      return 'Do not include credentials in the server address.';
     return undefined;
-  } catch {
-    return 'Enter a complete Jellyfin address, including http:// or https://.';
+  }
+}
+
+function normalizedServerUrl(serverUrl: string): NormalizedServerAddress {
+  try {
+    return normalizeServerUrl(serverUrl, { allowInsecureRemote: true });
+  } catch (reason) {
+    throw reason instanceof Error ? reason : new Error('The Jellyfin server URL is not valid.');
   }
 }
 
 export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps) {
-  const [serverUrl, setServerUrl] = useState('https://');
+  const [serverUrl, setServerUrl] = useState(DEFAULT_JELLYFIN_SERVER_URL);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [quickCode, setQuickCode] = useState<string>();
   const [quickExpires, setQuickExpires] = useState<number>();
-  const [pendingInsecureAuth, setPendingInsecureAuth] = useState<AuthMode>();
+  const [pendingInsecureAuth, setPendingInsecureAuth] = useState<PendingInsecureAuth>();
   const [acknowledgedInsecure, setAcknowledgedInsecure] = useState(false);
+  const inspectedServer = inspectServerUrl(serverUrl);
 
   useEffect(() => {
     if (!quickCode) return;
     let active = true;
+    let polling = false;
     const timer = window.setInterval(() => {
+      if (polling) return;
+      polling = true;
       void bridge
         .request('connection.quickConnect.poll', {})
         .then((result) => {
@@ -78,6 +67,9 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
         })
         .catch((reason: unknown) => {
           if (active) setError(reason instanceof Error ? reason.message : 'Quick Connect failed.');
+        })
+        .finally(() => {
+          polling = false;
         });
     }, 2_000);
 
@@ -87,20 +79,28 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
     };
   }, [bridge, onConnected, quickCode]);
 
-  function validateBeforeAuth(mode: AuthMode): boolean {
-    const urlError = validateServerUrl(serverUrl.trim());
-    if (urlError) {
-      setError(urlError);
-      return false;
+  function beginAuthentication(mode: AuthMode): void {
+    let address: NormalizedServerAddress;
+    try {
+      address = normalizedServerUrl(serverUrl);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The Jellyfin server URL is not valid.');
+      return;
     }
-    if (isInsecureRemoteServer(serverUrl.trim()) && !acknowledgedInsecure) {
-      setPendingInsecureAuth(mode);
-      return false;
+    setServerUrl(address.url);
+    setError(undefined);
+    if (address.policy === 'remote-http-accepted' && !acknowledgedInsecure) {
+      setPendingInsecureAuth({ mode, serverUrl: address.url });
+      return;
     }
-    return true;
+    if (mode === 'password') void authenticateWithPassword(address.url);
+    else void startQuickConnect(address.url);
   }
 
-  async function authenticateWithPassword(allowInsecure = acknowledgedInsecure): Promise<void> {
+  async function authenticateWithPassword(
+    normalizedUrl: string,
+    allowInsecure = acknowledgedInsecure,
+  ): Promise<void> {
     if (!username.trim() || !password) {
       setError('Enter your Jellyfin username and password.');
       return;
@@ -108,13 +108,12 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
     setBusy(true);
     setError(undefined);
     try {
-      const trimmedUrl = serverUrl.trim();
       await bridge.request('connection.probe', {
-        serverUrl: trimmedUrl,
+        serverUrl: normalizedUrl,
         allowInsecureRemote: allowInsecure,
       });
       await bridge.request('connection.login.password', {
-        serverUrl: trimmedUrl,
+        serverUrl: normalizedUrl,
         username: username.trim(),
         password,
         allowInsecureRemote: allowInsecure,
@@ -129,17 +128,19 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
     }
   }
 
-  async function startQuickConnect(allowInsecure = acknowledgedInsecure): Promise<void> {
+  async function startQuickConnect(
+    normalizedUrl: string,
+    allowInsecure = acknowledgedInsecure,
+  ): Promise<void> {
     setBusy(true);
     setError(undefined);
     try {
-      const trimmedUrl = serverUrl.trim();
       await bridge.request('connection.probe', {
-        serverUrl: trimmedUrl,
+        serverUrl: normalizedUrl,
         allowInsecureRemote: allowInsecure,
       });
       const result = await bridge.request('connection.quickConnect.start', {
-        serverUrl: trimmedUrl,
+        serverUrl: normalizedUrl,
         allowInsecureRemote: allowInsecure,
       });
       setQuickCode(result.code);
@@ -153,10 +154,15 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
 
   function continueInsecureAuth(): void {
     if (!acknowledgedInsecure || !pendingInsecureAuth) return;
-    const mode = pendingInsecureAuth;
+    const pending = pendingInsecureAuth;
     setPendingInsecureAuth(undefined);
-    if (mode === 'password') void authenticateWithPassword(true);
-    else void startQuickConnect(true);
+    if (pending.mode === 'password') void authenticateWithPassword(pending.serverUrl, true);
+    else void startQuickConnect(pending.serverUrl, true);
+  }
+
+  function dismissInsecureAuth(): void {
+    setPendingInsecureAuth(undefined);
+    setAcknowledgedInsecure(false);
   }
 
   return (
@@ -174,7 +180,7 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (validateBeforeAuth('password')) void authenticateWithPassword();
+            beginAuthentication('password');
           }}
         >
           <label className="form-field">
@@ -184,15 +190,23 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
               onChange={(event) => {
                 setServerUrl(event.target.value);
                 setAcknowledgedInsecure(false);
+                setPendingInsecureAuth(undefined);
+                setQuickCode(undefined);
+                setError(undefined);
               }}
-              type="url"
+              onBlur={() => {
+                const address = inspectServerUrl(serverUrl);
+                if (address !== undefined) setServerUrl(address.url);
+              }}
+              type="text"
+              inputMode="url"
               autoCapitalize="none"
               autoCorrect="off"
               spellCheck="false"
-              placeholder="https://jellyfin.example.com/media"
+              placeholder={DEFAULT_JELLYFIN_SERVER_URL}
             />
           </label>
-          {isInsecureLocalServer(serverUrl.trim()) ? (
+          {inspectedServer?.policy === 'local-http-warning' ? (
             <p className="lan-http-note" role="note">
               <ShieldWarning size={16} aria-hidden="true" />
               Local HTTP is unencrypted. Connect only on a network you trust.
@@ -240,7 +254,7 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
           type="button"
           disabled={busy}
           onClick={() => {
-            if (validateBeforeAuth('quick-connect')) void startQuickConnect();
+            beginAuthentication('quick-connect');
           }}
         >
           Quick Connect
@@ -277,7 +291,7 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
             <button
               className="modal-close"
               type="button"
-              onClick={() => setPendingInsecureAuth(undefined)}
+              onClick={dismissInsecureAuth}
               aria-label="Close insecure connection warning"
             >
               <X size={18} aria-hidden="true" />
@@ -299,11 +313,7 @@ export function ConnectionScreen({ bridge, onConnected }: ConnectionScreenProps)
               <span>I understand and want to connect anyway.</span>
             </label>
             <div className="modal-actions">
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => setPendingInsecureAuth(undefined)}
-              >
+              <button className="secondary-button" type="button" onClick={dismissInsecureAuth}>
                 Cancel
               </button>
               <button

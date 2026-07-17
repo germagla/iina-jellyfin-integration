@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ConnectionStore, keychainAccount } from '../src/persistence';
+import { KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE } from '../src/constants';
+import { ConnectionStore } from '../src/persistence';
 
 function createHarness(
-  options: { rejectWrite?: (name: string, password: string) => boolean } = {},
+  options: {
+    rejectWrite?: (name: string, password: string) => boolean;
+    sync?: () => void;
+  } = {},
 ) {
   const preferences = new Map<string, unknown>();
   const secrets = new Map<string, string>();
@@ -13,11 +17,11 @@ function createHarness(
       {
         get: (key) => preferences.get(key),
         set: (key, value) => preferences.set(key, value),
-        sync: () => undefined,
+        sync: options.sync ?? (() => undefined),
       },
       {
-        keyChainRead: (service, name) => secrets.get(`${service}:${name}`) ?? false,
-        keyChainWrite: (service, name, password) => {
+        read: (service, name) => secrets.get(`${service}:${name}`) ?? false,
+        write: (service, name, password) => {
           if (options.rejectWrite?.(name, password) === true) return false;
           secrets.set(`${service}:${name}`, password);
           return true;
@@ -49,8 +53,11 @@ describe('ConnectionStore', () => {
     expect(store.readAccessToken(metadata)).toBe('top-secret-token');
   });
 
-  it('uses stable, account-specific keychain names', () => {
-    expect(keychainAccount(metadata)).toBe('server-1:user-1');
+  it('uses one stable Keychain item for the single V1 connection', () => {
+    const { secrets, store } = createHarness();
+    store.save(metadata, 'top-secret-token');
+
+    expect([...secrets.keys()]).toEqual([`${KEYCHAIN_SERVICE}:${KEYCHAIN_ACCOUNT}`]);
   });
 
   it('will not release a token when preference metadata is redirected to another URL', () => {
@@ -79,11 +86,8 @@ describe('ConnectionStore', () => {
     expect(store.readAccessToken(metadata)).toBe('top-secret-token');
   });
 
-  it('does not switch accounts when the previous Keychain token cannot be erased', () => {
-    const previousAccount = keychainAccount(metadata);
-    const { store } = createHarness({
-      rejectWrite: (name, password) => name === previousAccount && password === '',
-    });
+  it('replaces the active connection atomically', () => {
+    const { store } = createHarness();
     store.save(metadata, 'first-token');
     const nextMetadata = {
       ...metadata,
@@ -91,9 +95,60 @@ describe('ConnectionStore', () => {
       username: 'second-viewer',
     };
 
-    expect(() => store.save(nextMetadata, 'second-token')).toThrow('did not remove');
+    store.save(nextMetadata, 'second-token');
+
+    expect(store.readMetadata()).toEqual(nextMetadata);
+    expect(store.readAccessToken(metadata)).toBeUndefined();
+    expect(store.readAccessToken(nextMetadata)).toBe('second-token');
+  });
+
+  it('keeps the previous connection when Keychain refuses a replacement token', () => {
+    let rejectReplacement = false;
+    const { store } = createHarness({
+      rejectWrite: (_name, password) => rejectReplacement && password.includes('second-token'),
+    });
+    store.save(metadata, 'first-token');
+    const nextMetadata = {
+      ...metadata,
+      userId: 'user-2',
+      username: 'second-viewer',
+    };
+    rejectReplacement = true;
+
+    expect(() => store.save(nextMetadata, 'second-token')).toThrow('did not accept');
     expect(store.readMetadata()).toEqual(metadata);
     expect(store.readAccessToken(metadata)).toBe('first-token');
     expect(store.readAccessToken(nextMetadata)).toBeUndefined();
+  });
+
+  it('clears the fixed Keychain item even when metadata is missing', () => {
+    const { secrets, store } = createHarness();
+    secrets.set(`${KEYCHAIN_SERVICE}:${KEYCHAIN_ACCOUNT}`, 'orphaned-token');
+
+    store.clear();
+
+    expect(secrets.get(`${KEYCHAIN_SERVICE}:${KEYCHAIN_ACCOUNT}`)).toBe('');
+  });
+
+  it('restores preferences and reports when a Keychain rollback fails', () => {
+    let syncCalls = 0;
+    let rejectRollback = false;
+    const { store } = createHarness({
+      rejectWrite: (_name, password) => rejectRollback && password.includes('first-token'),
+      sync: () => {
+        syncCalls += 1;
+        if (syncCalls === 2) throw new Error('preference sync failed');
+      },
+    });
+    store.save(metadata, 'first-token');
+    rejectRollback = true;
+    const nextMetadata = {
+      ...metadata,
+      userId: 'user-2',
+      username: 'second-viewer',
+    };
+
+    expect(() => store.save(nextMetadata, 'second-token')).toThrow('restored safely');
+    expect(store.readMetadata()).toEqual(metadata);
   });
 });

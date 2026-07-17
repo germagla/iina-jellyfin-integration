@@ -1,6 +1,6 @@
 {
   "name": "iina-jellyfin-integration",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "An IINA-native Direct Mode client for Jellyfin.",
   "license": "MIT",
@@ -23,6 +23,8 @@
     "dev": "pnpm --filter @iina-jellyfin/ui dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "iina:link": "pnpm build && node scripts/link-development-plugin.mjs",
+    "iina:unlink": "/Applications/IINA.app/Contents/MacOS/iina-plugin unlink .",
     "lint": "eslint .",
     "package:archive": "pnpm build && node scripts/create-archive.mjs",
     "package:validate": "node scripts/validate-package.mjs",

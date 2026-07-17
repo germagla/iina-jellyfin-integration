@@ -105,6 +105,8 @@ const demoVersions: MediaVersionChoice[] = [
 
 export const demoShowDetails: ShowDetails = {
   id: 'horizons-episode-3',
+  kind: 'episode',
+  playable: true,
   title: 'HORIZONS',
   episodeTitle: 'Crossing Lines',
   episodeLabel: 'S1 · E3',
