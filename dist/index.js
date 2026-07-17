@@ -6389,6 +6389,7 @@
   // packages/plugin/src/constants.ts
   var DEFAULT_PROGRESS_INTERVAL_MS = 1e4;
   var DEFAULT_ARTWORK_LIMIT_BYTES = 8 * 1024 * 1024;
+  var AUTO_SKIP_CHAPTER_TITLES_PREFERENCE_KEY = "autoSkipChapterTitles";
   var PLAYER_MESSAGES = {
     catalogOpen: "jellyfin.catalog.open",
     closed: "jellyfin.player.closed",
@@ -6452,6 +6453,10 @@
     const serverStartOffset = transcodeStartOffset(plan);
     return ticksToSeconds(Math.max(0, plan.startPositionTicks - serverStartOffset));
   }
+  function parseAutoSkipChapterTitles(value) {
+    if (typeof value !== "string") return [];
+    return value.split(",").map((title) => title.trim()).filter((title) => title.length > 0);
+  }
   function mediaTitle(display) {
     if (display.seriesName !== void 0 && display.seasonNumber !== void 0 && display.episodeNumber !== void 0) {
       return `${display.seriesName} — S${String(display.seasonNumber).padStart(2, "0")}E${String(display.episodeNumber).padStart(2, "0")} — ${display.title}`;
@@ -6488,7 +6493,11 @@
     playbackStateSequence = 0;
     playbackStartedAtMs = 0;
     playbackStatePersistenceFailed = false;
+    autoSkipChapterTitles = [];
     install() {
+      this.autoSkipChapterTitles = parseAutoSkipChapterTitles(
+        this.api.preferences.get(AUTO_SKIP_CHAPTER_TITLES_PREFERENCE_KEY)
+      );
       this.api.global.onMessage(PLAYER_MESSAGES.launch, (raw) => this.receiveLaunch(raw));
       this.api.global.onMessage(PLAYER_MESSAGES.stop, (raw) => {
         const requested = raw.reason;
@@ -6507,6 +6516,7 @@
       this.api.event.on("mpv.pause.changed", () => void this.pauseChanged());
       this.api.event.on("mpv.speed.changed", () => this.playbackTimingChanged());
       this.api.event.on("mpv.paused-for-cache.changed", () => this.playbackTimingChanged());
+      this.api.event.on("mpv.chapter.changed", () => this.autoSkipChapter());
       this.api.event.on("mpv.seek", () => void this.reportImmediate("seek"));
       this.api.event.on("mpv.end-file", () => {
         this.handleEndFile();
@@ -6543,6 +6553,28 @@
       const sequence = ++this.replacementSequence;
       this.invalidatePendingLoads();
       this.enqueueControl(() => this.replace(launch, sequence));
+    }
+    autoSkipChapter() {
+      if (this.launch === void 0 || this.autoSkipChapterTitles.length === 0) return;
+      const position2 = this.api.core.status.position;
+      if (position2 === null || !Number.isFinite(position2)) return;
+      const chapters = this.api.core.getChapters();
+      let currentChapter = -1;
+      for (let index = 0; index < chapters.length; index += 1) {
+        const chapter = chapters[index];
+        if (chapter === void 0 || chapter.start > position2) break;
+        currentChapter = index;
+      }
+      const current = chapters[currentChapter];
+      const next = chapters[currentChapter + 1];
+      if (current === void 0 || next === void 0 || !this.autoSkipChapterTitles.includes(current.title.trim())) {
+        return;
+      }
+      this.logger.info("player.chapter.auto-skip", {
+        correlation: this.launch.diagnosticCorrelation,
+        chapter: currentChapter
+      });
+      this.api.core.seekTo(next.start);
     }
     async resolveLoad(next) {
       const original = this.api.mpv.getString("stream-open-filename");

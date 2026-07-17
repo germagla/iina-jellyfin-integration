@@ -24,6 +24,21 @@
       <p class="small status" data-open-status role="status" aria-live="polite"></p>
     </section>
 
+    <section class="pref-section playback-section" aria-labelledby="playback-heading">
+      <h2 id="playback-heading">Playback</h2>
+      <label for="auto-skip-chapter-titles">Auto-skip chapter titles</label>
+      <input
+        id="auto-skip-chapter-titles"
+        type="text"
+        data-pref-key="autoSkipChapterTitles"
+        aria-describedby="auto-skip-chapter-titles-help"
+      />
+      <p id="auto-skip-chapter-titles-help" class="small secondary pref-help">
+        Enter exact chapter titles separated by commas. Matching chapters automatically advance to
+        the next chapter.
+      </p>
+    </section>
+
     <section class="pref-section diagnostics-section" aria-labelledby="diagnostics-heading">
       <div>
         <h2 id="diagnostics-heading">Diagnostics</h2>

@@ -15,7 +15,11 @@ import {
   type PlaybackSessionState,
   type PublicPlaybackState,
 } from '@iina-jellyfin/core';
-import { DEFAULT_PROGRESS_INTERVAL_MS, PLAYER_MESSAGES } from './constants';
+import {
+  AUTO_SKIP_CHAPTER_TITLES_PREFERENCE_KEY,
+  DEFAULT_PROGRESS_INTERVAL_MS,
+  PLAYER_MESSAGES,
+} from './constants';
 import type { IinaHttpTransport } from './iina-http';
 import type { PlayerLaunch } from './player-messages';
 import { writePlaybackState } from './playback-state-mailbox';
@@ -91,6 +95,14 @@ function localStartPositionSeconds(plan: PlayerLaunch['plan']): number {
   return ticksToSeconds(Math.max(0, plan.startPositionTicks - serverStartOffset));
 }
 
+function parseAutoSkipChapterTitles(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  return value
+    .split(',')
+    .map((title) => title.trim())
+    .filter((title) => title.length > 0);
+}
+
 function mediaTitle(display: PlayerLaunch['display']): string {
   if (
     display.seriesName !== undefined &&
@@ -127,6 +139,7 @@ export class PlayerRuntime {
   private playbackStateSequence = 0;
   private playbackStartedAtMs = 0;
   private playbackStatePersistenceFailed = false;
+  private autoSkipChapterTitles: string[] = [];
 
   constructor(
     private readonly api: PlayerApi,
@@ -135,6 +148,9 @@ export class PlayerRuntime {
   ) {}
 
   install(): void {
+    this.autoSkipChapterTitles = parseAutoSkipChapterTitles(
+      this.api.preferences.get(AUTO_SKIP_CHAPTER_TITLES_PREFERENCE_KEY),
+    );
     this.api.global.onMessage(PLAYER_MESSAGES.launch, (raw) => this.receiveLaunch(raw));
     this.api.global.onMessage(PLAYER_MESSAGES.stop, (raw) => {
       const requested = (raw as { reason?: unknown }).reason;
@@ -155,6 +171,7 @@ export class PlayerRuntime {
     this.api.event.on('mpv.pause.changed', () => void this.pauseChanged());
     this.api.event.on('mpv.speed.changed', () => this.playbackTimingChanged());
     this.api.event.on('mpv.paused-for-cache.changed', () => this.playbackTimingChanged());
+    this.api.event.on('mpv.chapter.changed', () => this.autoSkipChapter());
     this.api.event.on('mpv.seek', () => void this.reportImmediate('seek'));
     this.api.event.on('mpv.end-file', () => {
       this.handleEndFile();
@@ -204,6 +221,35 @@ export class PlayerRuntime {
     const sequence = ++this.replacementSequence;
     this.invalidatePendingLoads();
     this.enqueueControl(() => this.replace(launch, sequence));
+  }
+
+  private autoSkipChapter(): void {
+    if (this.launch === undefined || this.autoSkipChapterTitles.length === 0) return;
+    const position = this.api.core.status.position;
+    if (position === null || !Number.isFinite(position)) return;
+
+    const chapters = this.api.core.getChapters();
+    let currentChapter = -1;
+    for (let index = 0; index < chapters.length; index += 1) {
+      const chapter = chapters[index];
+      if (chapter === undefined || chapter.start > position) break;
+      currentChapter = index;
+    }
+    const current = chapters[currentChapter];
+    const next = chapters[currentChapter + 1];
+    if (
+      current === undefined ||
+      next === undefined ||
+      !this.autoSkipChapterTitles.includes(current.title.trim())
+    ) {
+      return;
+    }
+
+    this.logger.info('player.chapter.auto-skip', {
+      correlation: this.launch.diagnosticCorrelation,
+      chapter: currentChapter,
+    });
+    this.api.core.seekTo(next.start);
   }
 
   private async resolveLoad(next?: () => void): Promise<void> {
@@ -1086,4 +1132,10 @@ export class PlayerRuntime {
   }
 }
 
-export { localStartPositionSeconds, safeHeaders, safeSubtitleExtension, transcodeStartOffset };
+export {
+  localStartPositionSeconds,
+  parseAutoSkipChapterTitles,
+  safeHeaders,
+  safeSubtitleExtension,
+  transcodeStartOffset,
+};

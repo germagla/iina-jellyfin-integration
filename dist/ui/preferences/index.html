@@ -4,13 +4,13 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-zrNLx7D/wGa/pyMq/3H38/iSaf8jXnKTA8LwEuIvecQ='; style-src 'sha256-8lWzoNMJbIqWNhr+kg0NlkVsN7PPI8QRJ/q+dafe8PA='; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'none'; script-src 'sha256-zrNLx7D/wGa/pyMq/3H38/iSaf8jXnKTA8LwEuIvecQ='; style-src 'sha256-1tg0+4FaMQngES0mjpM3H/SA1sS6uZXwqovP91qsekE='; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
     <title>Jellyfin for IINA Preferences</title>
     
-    <style>:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,SF Pro Text,Helvetica Neue,sans-serif;font-size:13px}*{box-sizing:border-box}body{margin:0;padding:16px}h2{margin:0 0 6px;font-size:13px;font-weight:600}p{margin:0}.pref-section{margin-bottom:18px}.small,small{font-size:11px}.secondary{opacity:.58}.pref-help{line-height:1.4}.library-section,.diagnostics-section{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;align-items:center}.primary-action{min-height:26px;padding:3px 12px;white-space:nowrap}.status{grid-column:1 / -1;min-height:14px;opacity:.7}.status[data-state=error]{color:#d13b32;opacity:1}.checkbox-row{display:flex;gap:7px;align-items:flex-start}.checkbox-row input{margin-top:1px}.checkbox-row span,.checkbox-row small{display:block}.checkbox-row small{margin-top:2px;line-height:1.35}.privacy-section{margin-bottom:0}@media(prefers-color-scheme:dark){.status[data-state=error]{color:#ff6961}}
+    <style>:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,SF Pro Text,Helvetica Neue,sans-serif;font-size:13px}*{box-sizing:border-box}body{margin:0;padding:16px}h2{margin:0 0 6px;font-size:13px;font-weight:600}p{margin:0}.pref-section{margin-bottom:18px}.small,small{font-size:11px}.secondary{opacity:.58}.pref-help{line-height:1.4}.library-section,.diagnostics-section{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;align-items:center}.primary-action{min-height:26px;padding:3px 12px;white-space:nowrap}.playback-section label{display:block;margin-bottom:4px}.playback-section input{width:100%;margin-bottom:4px}.status{grid-column:1 / -1;min-height:14px;opacity:.7}.status[data-state=error]{color:#d13b32;opacity:1}.checkbox-row{display:flex;gap:7px;align-items:flex-start}.checkbox-row input{margin-top:1px}.checkbox-row span,.checkbox-row small{display:block}.checkbox-row small{margin-top:2px;line-height:1.35}.privacy-section{margin-bottom:0}@media(prefers-color-scheme:dark){.status[data-state=error]{color:#ff6961}}
 </style>
   </head>
   <body>
@@ -24,6 +24,21 @@
       </div>
       <button type="button" class="primary-action" data-open-catalog>Open Jellyfin Library</button>
       <p class="small status" data-open-status role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="pref-section playback-section" aria-labelledby="playback-heading">
+      <h2 id="playback-heading">Playback</h2>
+      <label for="auto-skip-chapter-titles">Auto-skip chapter titles</label>
+      <input
+        id="auto-skip-chapter-titles"
+        type="text"
+        data-pref-key="autoSkipChapterTitles"
+        aria-describedby="auto-skip-chapter-titles-help"
+      />
+      <p id="auto-skip-chapter-titles-help" class="small secondary pref-help">
+        Enter exact chapter titles separated by commas. Matching chapters automatically advance to
+        the next chapter.
+      </p>
     </section>
 
     <section class="pref-section diagnostics-section" aria-labelledby="diagnostics-heading">

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PlaybackPlan, PlaybackSessionState } from '@iina-jellyfin/core';
 import {
   localStartPositionSeconds,
+  parseAutoSkipChapterTitles,
   PlayerRuntime,
   safeHeaders,
   safeSubtitleExtension,
@@ -46,9 +47,10 @@ function createRuntime() {
     core: {
       osd: vi.fn(),
       seekTo: vi.fn(),
+      getChapters: vi.fn<() => IINA.Chapter[]>(() => []),
       stop: vi.fn(),
       open: vi.fn(),
-      status: { idle: true },
+      status: { idle: true, position: 0 as number | null },
       subtitle: { loadTrack },
     },
     file: {
@@ -127,6 +129,78 @@ function seedSession(
   };
   if (externalSubtitlePath !== undefined) internals.externalSubtitlePath = externalSubtitlePath;
 }
+
+describe('auto-skip chapter boundaries', () => {
+  it('parses comma-separated preference values into trimmed chapter titles', () => {
+    expect(parseAutoSkipChapterTitles('Opening, opening,Ending,ending,, ')).toEqual([
+      'Opening',
+      'opening',
+      'Ending',
+      'ending',
+    ]);
+    expect(parseAutoSkipChapterTitles(undefined)).toEqual([]);
+  });
+
+  it('seeks to the next chapter when the current title is configured', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      seedSession(runtime, 'playing');
+      api.preferences.get.mockReturnValue('Opening,opening,Ending,ending');
+      api.core.status.position = 15;
+      api.core.getChapters.mockReturnValue([
+        { title: 'Opening', start: 0 },
+        { title: 'Episode', start: 90 },
+      ]);
+
+      runtime.install();
+      const chapterHandler = api.event.on.mock.calls.find(
+        ([name]) => name === 'mpv.chapter.changed',
+      )?.[1] as (() => void) | undefined;
+      chapterHandler?.();
+
+      expect(api.core.getChapters).toHaveBeenCalledOnce();
+      expect(api.mpv.getNative).not.toHaveBeenCalled();
+      expect(api.core.seekTo).toHaveBeenCalledWith(90);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not skip an unmatched or final chapter', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      seedSession(runtime, 'playing');
+      api.preferences.get.mockReturnValue('Opening,opening,Ending,ending');
+      api.core.status.position = 15;
+      api.core.getChapters.mockReturnValue([
+        { title: 'Episode', start: 0 },
+        { title: 'Ending', start: 45 },
+      ]);
+
+      runtime.install();
+      const chapterHandler = api.event.on.mock.calls.find(
+        ([name]) => name === 'mpv.chapter.changed',
+      )?.[1] as (() => void) | undefined;
+      chapterHandler?.();
+      expect(api.core.seekTo).not.toHaveBeenCalled();
+
+      api.core.status.position = 45;
+      api.core.getChapters.mockReturnValue([{ title: 'Ending', start: 45 }]);
+      chapterHandler?.();
+      expect(api.core.seekTo).not.toHaveBeenCalled();
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('player runtime boundaries', () => {
   it('installs launch handlers without relying on IINA child-to-global messaging', () => {
