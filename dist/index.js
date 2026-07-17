@@ -5765,6 +5765,7 @@
     "playback.start": external_exports.discriminatedUnion("status", [
       external_exports.object({
         status: external_exports.literal("started"),
+        playbackId: identifier3,
         plan: PublicPlaybackPlanSchema
       }).strict(),
       external_exports.object({
@@ -5853,6 +5854,41 @@
       },
       body: buildPlaybackReportPayload(kind, state, telemetry)
     };
+  }
+
+  // packages/core/src/playback-state.ts
+  var safeTicks2 = external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+  var safeIndex = external_exports.number().int().nonnegative().max(1e6);
+  var safeText = external_exports.string().trim().min(1).max(512);
+  var PublicPlaybackStateSchema = external_exports.object({
+    version: external_exports.literal(1),
+    playbackId: external_exports.string().trim().min(1).max(128),
+    sequence: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    generation: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    status: external_exports.enum(["preparing", "playing", "paused", "stopped", "error"]),
+    itemId: external_exports.string().trim().min(1).max(512),
+    positionTicks: safeTicks2,
+    durationTicks: safeTicks2.optional(),
+    playbackRate: external_exports.number().finite().min(0.01).max(100).optional(),
+    isBuffering: external_exports.boolean().optional(),
+    title: safeText,
+    seriesName: safeText.optional(),
+    seasonNumber: safeIndex.optional(),
+    episodeNumber: safeIndex.optional(),
+    playMethod: PlayMethodSchema,
+    stopReason: external_exports.enum(["completed", "closed", "replaced", "failed", "user"]).optional(),
+    startedAtMs: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    updatedAtMs: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+  }).strict();
+  var PublicPlaybackStateRemovalSchema = external_exports.object({
+    version: external_exports.literal(1),
+    playbackId: external_exports.string().trim().min(1).max(128),
+    generation: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    sequence: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    removedAtMs: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+  }).strict();
+  function serializePublicPlaybackState(state) {
+    return JSON.stringify(PublicPlaybackStateSchema.parse(state));
   }
 
   // packages/core/src/preference-contracts.ts
@@ -6365,6 +6401,18 @@
     upNext: "jellyfin.player.up-next"
   };
 
+  // packages/plugin/src/playback-state-mailbox.ts
+  var PLAYBACK_STATE_FILE_PREFIX = "jellyfin-playback-state-";
+  var PLAYBACK_STATE_FILE_SUFFIX = ".json";
+  var SAFE_PLAYBACK_ID = /^[A-Za-z0-9-]{1,128}$/;
+  function playbackStatePath(playbackId) {
+    if (!SAFE_PLAYBACK_ID.test(playbackId)) throw new Error("Invalid public playback identifier.");
+    return `@tmp/${PLAYBACK_STATE_FILE_PREFIX}${playbackId}${PLAYBACK_STATE_FILE_SUFFIX}`;
+  }
+  function writePlaybackState(file, state) {
+    file.write(playbackStatePath(state.playbackId), serializePublicPlaybackState(state));
+  }
+
   // packages/plugin/src/player-runtime.ts
   var StalePlayerLoadError = class extends Error {
     constructor() {
@@ -6437,6 +6485,9 @@
     pendingCoreStopAcknowledgement;
     loadSequence = 0;
     activeLoadReplacementSequence;
+    playbackStateSequence = 0;
+    playbackStartedAtMs = 0;
+    playbackStatePersistenceFailed = false;
     install() {
       this.api.global.onMessage(PLAYER_MESSAGES.launch, (raw) => this.receiveLaunch(raw));
       this.api.global.onMessage(PLAYER_MESSAGES.stop, (raw) => {
@@ -6454,6 +6505,8 @@
       this.api.event.on("iina.window-loaded", () => this.loadPlayerViews());
       this.api.event.on("iina.file-loaded", () => void this.mediaLoaded());
       this.api.event.on("mpv.pause.changed", () => void this.pauseChanged());
+      this.api.event.on("mpv.speed.changed", () => this.playbackTimingChanged());
+      this.api.event.on("mpv.paused-for-cache.changed", () => this.playbackTimingChanged());
       this.api.event.on("mpv.seek", () => void this.reportImmediate("seek"));
       this.api.event.on("mpv.end-file", () => {
         this.handleEndFile();
@@ -6531,7 +6584,9 @@
         this.launch = launch;
         this.activeLoadReplacementSequence = pending.replacementSequence;
         this.session = beginPlaybackSession(this.session, launch.plan);
+        this.playbackStartedAtMs = Date.now();
         const generation = this.session.generation;
+        this.publishState();
         this.logger.info("player.plan.received", {
           correlation: launch.diagnosticCorrelation,
           playMethod: launch.plan.playMethod,
@@ -6657,16 +6712,23 @@
         positionTicks: this.launch.plan.startPositionTicks,
         durationTicks: this.readDurationTicks()
       });
+      if (this.api.mpv.getFlag("pause")) {
+        this.session = reducePlaybackSession(this.session, {
+          type: "pause",
+          generation,
+          positionTicks: this.session.positionTicks
+        });
+      }
       this.logger.info("player.media.loaded", {
         correlation: this.launch.diagnosticCorrelation,
         playMethod: this.launch.plan.playMethod,
         resumed: this.launch.plan.startPositionTicks > 0
       });
+      this.publishState();
       if (this.startedGeneration !== generation) {
         this.startedGeneration = generation;
         await this.sendReport("start");
       }
-      this.publishState();
     }
     loadExternalSubtitleTrack() {
       const path = this.externalSubtitlePath;
@@ -6748,8 +6810,8 @@
         generation: this.session.generation,
         positionTicks: this.session.positionTicks
       });
-      await this.sendReport("progress", paused ? "pause" : "unpause");
       this.publishState();
+      await this.sendReport("progress", paused ? "pause" : "unpause");
     }
     async reportImmediate(eventName) {
       if (this.launch === void 0 || this.session.status !== "playing" && this.session.status !== "paused") {
@@ -6761,15 +6823,27 @@
         generation: this.session.generation,
         positionTicks: this.session.positionTicks
       });
+      this.publishState();
       await this.sendReport("progress", eventName);
+    }
+    playbackTimingChanged() {
+      if (this.launch === void 0 || this.session.status !== "playing" && this.session.status !== "paused") {
+        return;
+      }
+      this.updatePosition();
       this.publishState();
     }
     async periodicProgress() {
+      if (this.launch !== void 0 && (this.session.status === "preparing" || this.session.status === "paused")) {
+        if (this.session.status === "paused") this.updatePosition();
+        this.publishState();
+        return;
+      }
       if (!shouldReportPeriodicProgress(this.session, Date.now(), DEFAULT_PROGRESS_INTERVAL_MS))
         return;
       this.updatePosition();
-      await this.sendReport("progress", "timeupdate");
       this.publishState();
+      await this.sendReport("progress", "timeupdate");
     }
     async sendReport(kind, eventName) {
       const launch = this.launch;
@@ -7085,6 +7159,46 @@
       };
       if (this.sidebarReady) this.api.sidebar.postMessage("player.state", state);
       if (this.overlayReady) this.api.overlay.postMessage("player.state", state);
+      this.persistPublicPlaybackState();
+    }
+    persistPublicPlaybackState() {
+      const launch = this.launch;
+      if (launch === void 0 || this.session.status === "idle") return;
+      const state = {
+        version: 1,
+        playbackId: launch.nonce,
+        sequence: ++this.playbackStateSequence,
+        generation: this.session.generation,
+        status: this.session.status,
+        itemId: launch.plan.itemId,
+        positionTicks: this.session.positionTicks,
+        title: launch.display.title,
+        playMethod: launch.plan.playMethod,
+        startedAtMs: this.playbackStartedAtMs,
+        updatedAtMs: Date.now(),
+        isBuffering: this.api.mpv.getFlag("paused-for-cache")
+      };
+      const playbackRate = this.api.mpv.getNumber("speed");
+      if (Number.isFinite(playbackRate) && playbackRate >= 0.01 && playbackRate <= 100) {
+        state.playbackRate = playbackRate;
+      }
+      if (this.session.durationTicks !== void 0) state.durationTicks = this.session.durationTicks;
+      if (launch.display.seriesName !== void 0) state.seriesName = launch.display.seriesName;
+      if (launch.display.seasonNumber !== void 0) {
+        state.seasonNumber = launch.display.seasonNumber;
+      }
+      if (launch.display.episodeNumber !== void 0) {
+        state.episodeNumber = launch.display.episodeNumber;
+      }
+      if (this.session.stopReason !== void 0) state.stopReason = this.session.stopReason;
+      try {
+        writePlaybackState(this.api.file, state);
+        this.playbackStatePersistenceFailed = false;
+      } catch (error) {
+        if (this.playbackStatePersistenceFailed) return;
+        this.playbackStatePersistenceFailed = true;
+        this.logger.warn("Could not publish playback state to the Jellyfin catalog", error);
+      }
     }
     receiveUpNext(raw) {
       if (raw === null || typeof raw !== "object") return;

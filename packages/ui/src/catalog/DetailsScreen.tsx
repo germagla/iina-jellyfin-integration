@@ -3,6 +3,7 @@ import {
   ArrowSquareOut,
   Check,
   Cube,
+  Pause,
   Play,
   SpeakerHigh,
   SpinnerGap,
@@ -11,12 +12,13 @@ import {
   Warning,
   X,
 } from '@phosphor-icons/react';
-import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   BridgePayload,
   CatalogBridge,
   EpisodeDetails,
   MediaVersionChoice,
+  PublicPlaybackState,
   ShowDetails,
   SupportedLibrary,
   TrackChoice,
@@ -48,6 +50,76 @@ interface PlaybackSelection {
   versionId: string;
   audioTrackId: string;
   subtitleTrackId: string;
+}
+
+const TICKS_PER_SECOND = 10_000_000;
+const PLAYBACK_ACKNOWLEDGEMENT_TIMEOUT_MS = 20_000;
+const PLAYBACK_PREPARATION_TIMEOUT_MS = 60_000;
+const PLAYBACK_ACKNOWLEDGEMENT_ERROR =
+  'IINA did not report that playback started. Check the player window and try again.';
+
+function isActivePlaybackState(state: PublicPlaybackState): boolean {
+  return state.status === 'preparing' || state.status === 'playing' || state.status === 'paused';
+}
+
+function preferredPlaybackState(
+  states: PublicPlaybackState[],
+  itemId: string,
+  requestedPlaybackId?: string,
+): PublicPlaybackState | undefined {
+  const matches = states.filter((state) => state.itemId === itemId);
+  const requested = matches.find((state) => state.playbackId === requestedPlaybackId);
+  if (requested !== undefined && isActivePlaybackState(requested)) return requested;
+  const active = matches
+    .filter(isActivePlaybackState)
+    .sort(
+      (left, right) => right.startedAtMs - left.startedAtMs || right.updatedAtMs - left.updatedAtMs,
+    )[0];
+  if (active !== undefined) return active;
+  if (requested !== undefined) return requested;
+  return matches.sort(
+    (left, right) => right.startedAtMs - left.startedAtMs || right.updatedAtMs - left.updatedAtMs,
+  )[0];
+}
+
+function ticksToClock(ticks: number): string {
+  const seconds = Math.max(0, Math.floor(ticks / TICKS_PER_SECOND));
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+    : `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+
+function currentPlaybackPosition(state: PublicPlaybackState | undefined, nowMs: number): number {
+  if (state === undefined) return 0;
+  const elapsedTicks =
+    state.status === 'playing' && state.playbackRate !== undefined && state.isBuffering === false
+      ? Math.max(0, nowMs - state.updatedAtMs) * (TICKS_PER_SECOND / 1_000) * state.playbackRate
+      : 0;
+  return Math.min(
+    state.durationTicks ?? Number.MAX_SAFE_INTEGER,
+    state.positionTicks + elapsedTicks,
+  );
+}
+
+function playbackProgress(state: PublicPlaybackState | undefined, positionTicks: number): number {
+  if (!state?.durationTicks) return 0;
+  if (state.status === 'stopped' && state.stopReason === 'completed') return 1;
+  return Math.min(1, Math.max(0, positionTicks / state.durationTicks));
+}
+
+function playbackStatusText(state: PublicPlaybackState, positionTicks: number): string {
+  const timing = state.durationTicks
+    ? `${ticksToClock(positionTicks)} of ${ticksToClock(state.durationTicks)}`
+    : ticksToClock(positionTicks);
+  if (state.status === 'preparing') return 'Starting playback in IINA…';
+  if (state.status === 'playing') return `Playing in IINA · ${timing}`;
+  if (state.status === 'paused') return `Paused in IINA · ${timing}`;
+  if (state.status === 'error') return 'Playback failed in IINA.';
+  if (state.stopReason === 'completed') return 'Finished playing in IINA.';
+  return `Playback stopped in IINA · ${timing}`;
 }
 
 function episodeLabel(episode: EpisodeDetails): string {
@@ -168,6 +240,96 @@ export function DetailsScreen({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
+  const [playbackStates, setPlaybackStates] = useState<PublicPlaybackState[]>(
+    () => bridge.getPlaybackStates?.() ?? [],
+  );
+  const [requestedPlaybackId, setRequestedPlaybackId] = useState<string>();
+  const [playbackAcknowledgementStartedAtMs, setPlaybackAcknowledgementStartedAtMs] =
+    useState<number>();
+  const [clockNowMs, setClockNowMs] = useState(Date.now);
+  const requestedPlaybackState = useMemo(
+    () => playbackStates.find((state) => state.playbackId === requestedPlaybackId),
+    [playbackStates, requestedPlaybackId],
+  );
+  const awaitingPlaybackAcknowledgement =
+    requestedPlaybackId !== undefined && playbackAcknowledgementStartedAtMs !== undefined;
+  const playbackState = useMemo(
+    () =>
+      awaitingPlaybackAcknowledgement
+        ? requestedPlaybackState
+        : preferredPlaybackState(playbackStates, details.id, requestedPlaybackId),
+    [
+      awaitingPlaybackAcknowledgement,
+      details.id,
+      playbackStates,
+      requestedPlaybackId,
+      requestedPlaybackState,
+    ],
+  );
+
+  useEffect(() => {
+    setPlaybackStates(bridge.getPlaybackStates?.() ?? []);
+    return bridge.subscribePlaybackStates?.(setPlaybackStates);
+  }, [bridge]);
+
+  useEffect(() => {
+    setClockNowMs(Date.now());
+    if (
+      !playbackStates.some((state) => state.status === 'preparing' || state.status === 'playing')
+    ) {
+      return;
+    }
+    const timer = setInterval(() => setClockNowMs(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [playbackStates]);
+
+  useEffect(() => {
+    if (requestedPlaybackState === undefined || playbackAcknowledgementStartedAtMs === undefined) {
+      return;
+    }
+    setNotice(undefined);
+    setPlaybackAcknowledgementStartedAtMs(undefined);
+    setError((current) => (current === PLAYBACK_ACKNOWLEDGEMENT_ERROR ? undefined : current));
+  }, [playbackAcknowledgementStartedAtMs, requestedPlaybackState]);
+
+  useEffect(() => {
+    if (
+      requestedPlaybackId === undefined ||
+      playbackAcknowledgementStartedAtMs === undefined ||
+      playbackStates.some((state) => state.playbackId === requestedPlaybackId)
+    ) {
+      return;
+    }
+    const elapsed = Date.now() - playbackAcknowledgementStartedAtMs;
+    const timer = setTimeout(
+      () => {
+        setRequestedPlaybackId(undefined);
+        setPlaybackAcknowledgementStartedAtMs(undefined);
+        setNotice(undefined);
+        setError(PLAYBACK_ACKNOWLEDGEMENT_ERROR);
+      },
+      Math.max(0, PLAYBACK_ACKNOWLEDGEMENT_TIMEOUT_MS - elapsed),
+    );
+    return () => clearTimeout(timer);
+  }, [playbackAcknowledgementStartedAtMs, playbackStates, requestedPlaybackId]);
+
+  useEffect(() => {
+    const refreshedEpisode = show.episodes.find((episode) => episode.id === details.id);
+    if (show.id !== details.id && refreshedEpisode === undefined) return;
+    const refreshed = detailsForEpisode(show, refreshedEpisode);
+    setDetails((current) => {
+      if (current.id !== refreshed.id) return current;
+      return {
+        ...current,
+        progress: refreshed.progress,
+        playbackPositionTicks: refreshed.playbackPositionTicks,
+        progressLabel: refreshed.progressLabel,
+        seasonProgressLabel: refreshed.seasonProgressLabel,
+        seasons: show.seasons,
+        episodes: show.episodes,
+      };
+    });
+  }, [details.id, show]);
 
   const visibleEpisodes = useMemo(() => {
     const season = show.seasons.find((candidate) => candidate.id === seasonId);
@@ -177,8 +339,51 @@ export function DetailsScreen({
   const selectedVersion =
     details.versions.find((version) => version.id === selection.versionId) ?? details.versions[0];
   const isPlayable = details.playable && (details.kind === 'movie' || details.kind === 'episode');
-  const isResumable = isPlayable && details.playbackPositionTicks > 0;
+  const livePositionTicks = currentPlaybackPosition(playbackState, clockNowMs);
+  const liveProgress = playbackProgress(playbackState, livePositionTicks);
+  const detailsPlaybackState = playbackState?.itemId === details.id ? playbackState : undefined;
+  const detailsPositionTicks = detailsPlaybackState
+    ? livePositionTicks
+    : details.playbackPositionTicks;
+  const nativeResumePositionTicks = detailsPlaybackState
+    ? detailsPlaybackState.positionTicks
+    : details.playbackPositionTicks;
+  const detailsProgress = detailsPlaybackState ? liveProgress : details.progress;
+  const preparationTimedOut =
+    detailsPlaybackState?.status === 'preparing' &&
+    clockNowMs - detailsPlaybackState.startedAtMs >= PLAYBACK_PREPARATION_TIMEOUT_MS;
+  const playbackLaunchPending =
+    awaitingPlaybackAcknowledgement && requestedPlaybackState === undefined;
+  const playbackIsActive =
+    playbackLaunchPending ||
+    (detailsPlaybackState?.status === 'preparing' && !preparationTimedOut) ||
+    detailsPlaybackState?.status === 'playing' ||
+    detailsPlaybackState?.status === 'paused';
+  const playbackCompleted =
+    detailsPlaybackState?.status === 'stopped' && detailsPlaybackState.stopReason === 'completed';
+  const hasResumePosition = isPlayable && !playbackCompleted && nativeResumePositionTicks > 0;
+  const isResumable = hasResumePosition && !playbackIsActive;
   const playableLabel = details.kind === 'movie' ? 'Movie' : 'Episode';
+  const primaryPlaybackLabel = preparationTimedOut
+    ? `Retry ${playableLabel}`
+    : playbackLaunchPending || detailsPlaybackState?.status === 'preparing'
+      ? `Starting ${playableLabel}`
+      : detailsPlaybackState?.status === 'playing'
+        ? `Playing ${playableLabel}`
+        : detailsPlaybackState?.status === 'paused'
+          ? `Paused ${playableLabel}`
+          : isResumable
+            ? `Resume ${playableLabel}`
+            : `Play ${playableLabel}`;
+  const primaryPlaybackDetail = playbackIsActive
+    ? detailsPlaybackState?.durationTicks
+      ? `${ticksToClock(detailsPositionTicks)} of ${ticksToClock(detailsPlaybackState.durationTicks)}`
+      : undefined
+    : isResumable
+      ? detailsPlaybackState?.durationTicks
+        ? `${ticksToClock(Math.max(0, detailsPlaybackState.durationTicks - detailsPositionTicks))} remaining`
+        : details.progressLabel
+      : undefined;
 
   function playbackPayload(
     startPositionTicks: number,
@@ -209,11 +414,17 @@ export function DetailsScreen({
     setBusy(true);
     setError(undefined);
     setNotice(undefined);
-    const startPositionTicks = startMode === 'resume' ? details.playbackPositionTicks : 0;
+    setPlaybackAcknowledgementStartedAtMs(undefined);
+    // The one-second extrapolation is presentation-only. Starting another
+    // player must use the last exact position observed from mpv so buffering or
+    // a non-1× playback speed cannot create a false resume offset.
+    const startPositionTicks = startMode === 'resume' ? nativeResumePositionTicks : 0;
     try {
       const payload = playbackPayload(startPositionTicks, newWindow);
       const result = await bridge.request('playback.start', payload);
       if (result.status === 'confirmation-required') {
+        setRequestedPlaybackId(undefined);
+        setPlaybackAcknowledgementStartedAtMs(undefined);
         setConfirmation({
           reason: result.plan.transcodeReasons.length
             ? result.plan.transcodeReasons.join(', ')
@@ -222,6 +433,8 @@ export function DetailsScreen({
           confirmationId: result.confirmationId,
         });
       } else {
+        setRequestedPlaybackId(result.playbackId);
+        setPlaybackAcknowledgementStartedAtMs(Date.now());
         setNotice(newWindow ? 'Opening in a new IINA window…' : 'Starting playback in IINA…');
       }
     } catch (reason) {
@@ -239,6 +452,8 @@ export function DetailsScreen({
     setSeasonId(nextSeasonId ?? seasonIdForEpisode(show, episode));
     setEpisodeLoadingId(episodeId);
     setConfirmation(undefined);
+    setRequestedPlaybackId(undefined);
+    setPlaybackAcknowledgementStartedAtMs(undefined);
     setNotice(undefined);
     setError(undefined);
     const optimisticDetails = detailsForEpisode(show, episode);
@@ -306,6 +521,8 @@ export function DetailsScreen({
       }
       const newWindow = confirmation.payload.openInNewWindow;
       setConfirmation(undefined);
+      setRequestedPlaybackId(result.playbackId);
+      setPlaybackAcknowledgementStartedAtMs(Date.now());
       setNotice(
         newWindow
           ? 'Opening converted playback in a new IINA window…'
@@ -371,25 +588,33 @@ export function DetailsScreen({
 
         {isPlayable ? (
           <>
-            {isResumable ? (
+            {detailsPositionTicks > 0 ? (
               <div className="season-progress">
                 <span>
                   <span>Progress</span>
-                  <span>{details.seasonProgressLabel}</span>
+                  <span>
+                    {playbackCompleted
+                      ? 'Completed'
+                      : detailsPlaybackState
+                        ? 'Current playback'
+                        : details.seasonProgressLabel}
+                  </span>
                 </span>
                 <ProgressBar
                   className="progress-track"
-                  label={`${Math.round(Math.min(1, Math.max(0, details.progress)) * 100)} percent watched`}
-                  value={details.progress}
+                  label={`${Math.round(Math.min(1, Math.max(0, detailsProgress)) * 100)} percent watched`}
+                  value={detailsProgress}
                 />
               </div>
             ) : null}
 
             <div className="playback-actions">
               <button
-                className="primary-button play-button"
+                className={`primary-button play-button${
+                  playbackIsActive ? ' play-button--active' : ''
+                }`}
                 type="button"
-                disabled={busy}
+                disabled={busy || playbackIsActive}
                 onClick={() => void requestPlayback(isResumable ? 'resume' : 'beginning')}
               >
                 {busy ? (
@@ -398,10 +623,8 @@ export function DetailsScreen({
                   <Play size={22} weight="fill" aria-hidden="true" />
                 )}
                 <span>
-                  <strong>
-                    {isResumable ? `Resume ${playableLabel}` : `Play ${playableLabel}`}
-                  </strong>
-                  {isResumable ? <small>{details.progressLabel}</small> : null}
+                  <strong>{primaryPlaybackLabel}</strong>
+                  {primaryPlaybackDetail ? <small>{primaryPlaybackDetail}</small> : null}
                 </span>
               </button>
               {isResumable ? (
@@ -420,8 +643,10 @@ export function DetailsScreen({
               <button
                 className="tertiary-button"
                 type="button"
-                disabled={busy}
-                onClick={() => void requestPlayback(isResumable ? 'resume' : 'beginning', true)}
+                disabled={busy || playbackLaunchPending}
+                onClick={() =>
+                  void requestPlayback(hasResumePosition ? 'resume' : 'beginning', true)
+                }
               >
                 <ArrowSquareOut size={18} aria-hidden="true" />
                 Open in New Window
@@ -434,7 +659,7 @@ export function DetailsScreen({
                 label="Version"
                 value={selection.versionId}
                 choices={details.versions}
-                disabled={busy}
+                disabled={busy || playbackLaunchPending}
                 onChange={selectVersion}
               />
               <ChoiceRow
@@ -442,7 +667,7 @@ export function DetailsScreen({
                 label="Audio"
                 value={selection.audioTrackId}
                 choices={selectedVersion?.audioTracks ?? []}
-                disabled={busy}
+                disabled={busy || playbackLaunchPending}
                 onChange={(audioTrackId) =>
                   setSelection((current) => ({ ...current, audioTrackId }))
                 }
@@ -452,7 +677,7 @@ export function DetailsScreen({
                 label="Subtitles"
                 value={selection.subtitleTrackId}
                 choices={selectedVersion?.subtitleTracks ?? []}
-                disabled={busy}
+                disabled={busy || playbackLaunchPending}
                 onChange={(subtitleTrackId) =>
                   setSelection((current) => ({ ...current, subtitleTrackId }))
                 }
@@ -467,10 +692,37 @@ export function DetailsScreen({
           </p>
         )}
 
-        {notice ? (
-          <p className="playback-notice" role="status">
-            <Check size={18} weight="bold" aria-hidden="true" />
-            {notice}
+        {detailsPlaybackState || notice ? (
+          <p
+            className={`playback-notice${
+              detailsPlaybackState
+                ? ` playback-notice--${preparationTimedOut ? 'error' : detailsPlaybackState.status}`
+                : ''
+            }`}
+            role={
+              detailsPlaybackState?.status === 'error' || preparationTimedOut ? 'alert' : 'status'
+            }
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {preparationTimedOut ? (
+              <Warning size={18} aria-hidden="true" />
+            ) : detailsPlaybackState?.status === 'preparing' ? (
+              <SpinnerGap className="spin" size={18} aria-hidden="true" />
+            ) : detailsPlaybackState?.status === 'paused' ? (
+              <Pause size={18} weight="fill" aria-hidden="true" />
+            ) : detailsPlaybackState?.status === 'error' ? (
+              <Warning size={18} aria-hidden="true" />
+            ) : detailsPlaybackState?.status === 'playing' ? (
+              <Play size={18} weight="fill" aria-hidden="true" />
+            ) : (
+              <Check size={18} weight="bold" aria-hidden="true" />
+            )}
+            {detailsPlaybackState
+              ? preparationTimedOut
+                ? 'IINA is taking longer than expected to start playback. You can try again.'
+                : playbackStatusText(detailsPlaybackState, detailsPositionTicks)
+              : notice}
           </p>
         ) : null}
         {error ? (
@@ -501,54 +753,65 @@ export function DetailsScreen({
             </select>
           </label>
           <div className="episode-strip">
-            {visibleEpisodes.map((episode) => (
-              <button
-                key={episode.id}
-                type="button"
-                disabled={busy}
-                className={
-                  episode.id === selectedEpisodeId
-                    ? 'episode-card episode-card--selected'
-                    : 'episode-card'
-                }
-                onClick={() => void selectEpisode(episode.id)}
-                aria-pressed={episode.id === selectedEpisodeId}
-                aria-busy={episodeLoadingId === episode.id}
-              >
-                <span className="episode-card__artwork">
-                  <BrokeredArtwork
-                    bridge={bridge}
-                    itemId={episode.id}
-                    imageType={episode.imageType ?? 'Thumb'}
-                    imageTag={episode.imageTag}
-                    width={640}
-                    height={360}
-                    source={episode.artwork}
-                    alt=""
-                    className="episode-card__image"
-                  />
-                  {episode.id === selectedEpisodeId ? (
-                    <span className="selected-check">
-                      <Check size={15} weight="bold" aria-hidden="true" />
-                    </span>
-                  ) : null}
-                  {typeof episode.progress === 'number' ? (
-                    <ProgressBar
-                      className="episode-card__progress"
-                      label={`${Math.round(Math.min(1, Math.max(0, episode.progress)) * 100)} percent watched`}
-                      value={episode.progress}
+            {visibleEpisodes.map((episode) => {
+              const episodePlaybackState = preferredPlaybackState(playbackStates, episode.id);
+              const episodePositionTicks = currentPlaybackPosition(
+                episodePlaybackState,
+                clockNowMs,
+              );
+              const episodeProgress =
+                episodePlaybackState === undefined
+                  ? episode.progress
+                  : playbackProgress(episodePlaybackState, episodePositionTicks);
+              return (
+                <button
+                  key={episode.id}
+                  type="button"
+                  disabled={busy}
+                  className={
+                    episode.id === selectedEpisodeId
+                      ? 'episode-card episode-card--selected'
+                      : 'episode-card'
+                  }
+                  onClick={() => void selectEpisode(episode.id)}
+                  aria-pressed={episode.id === selectedEpisodeId}
+                  aria-busy={episodeLoadingId === episode.id}
+                >
+                  <span className="episode-card__artwork">
+                    <BrokeredArtwork
+                      bridge={bridge}
+                      itemId={episode.id}
+                      imageType={episode.imageType ?? 'Thumb'}
+                      imageTag={episode.imageTag}
+                      width={640}
+                      height={360}
+                      source={episode.artwork}
+                      alt=""
+                      className="episode-card__image"
                     />
-                  ) : null}
-                </span>
-                <span className="episode-card__copy">
-                  <strong>
-                    {episode.episodeNumber !== undefined ? `${episode.episodeNumber}. ` : ''}
-                    {episode.title}
-                  </strong>
-                  <span>{episode.durationLabel}</span>
-                </span>
-              </button>
-            ))}
+                    {episode.id === selectedEpisodeId ? (
+                      <span className="selected-check">
+                        <Check size={15} weight="bold" aria-hidden="true" />
+                      </span>
+                    ) : null}
+                    {typeof episodeProgress === 'number' ? (
+                      <ProgressBar
+                        className="episode-card__progress"
+                        label={`${Math.round(Math.min(1, Math.max(0, episodeProgress)) * 100)} percent watched`}
+                        value={episodeProgress}
+                      />
+                    ) : null}
+                  </span>
+                  <span className="episode-card__copy">
+                    <strong>
+                      {episode.episodeNumber !== undefined ? `${episode.episodeNumber}. ` : ''}
+                      {episode.title}
+                    </strong>
+                    <span>{episode.durationLabel}</span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </section>
       ) : null}

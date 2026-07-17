@@ -54,6 +54,7 @@ function createRuntime() {
     file: {
       exists: vi.fn(() => true),
       delete: deleteFile,
+      write: vi.fn(),
       handle: vi.fn(() => ({
         seekToEnd: vi.fn(),
         offset: vi.fn(() => 100),
@@ -69,7 +70,9 @@ function createRuntime() {
     mpv: {
       addHook: vi.fn(),
       getString: vi.fn(() => ''),
-      getNumber: vi.fn((name: string): number => (name === 'duration' ? 60 : 0)),
+      getNumber: vi.fn((name: string): number =>
+        name === 'duration' ? 60 : name === 'speed' ? 1 : 0,
+      ),
       getFlag: vi.fn(() => false),
       getNative: vi.fn(() => []),
       set: vi.fn(),
@@ -174,6 +177,10 @@ describe('player runtime boundaries', () => {
       'Authorization: MediaBrowser Token="secret"',
     ]);
     expect(api.mpv.set).toHaveBeenCalledWith('stream-open-filename', plan.url);
+    expect(JSON.parse(api.file.write.mock.calls[0]?.[1] as string)).toMatchObject({
+      playbackId: launch.nonce,
+      status: 'preparing',
+    });
     const resumeOptionIndex = api.mpv.set.mock.calls.findIndex(
       ([name]) => name === 'file-local-options/resume-playback',
     );
@@ -184,6 +191,45 @@ describe('player runtime boundaries', () => {
     expect(streamUrlIndex).toBeGreaterThan(resumeOptionIndex);
     expect(next).toHaveBeenCalledOnce();
     clearInterval(internals.progressTimer);
+  });
+
+  it('publishes a bounded secret-free playback snapshot for the standalone catalog', () => {
+    const { runtime, api } = createRuntime();
+    seedSession(runtime, 'playing');
+    const internals = runtime as unknown as { publishState(): void };
+
+    internals.publishState();
+
+    expect(api.file.write).toHaveBeenCalledOnce();
+    const [path, raw] = api.file.write.mock.calls[0] as [string, string];
+    expect(path).toBe('@tmp/jellyfin-playback-state-play-1.json');
+    expect(JSON.parse(raw)).toMatchObject({
+      version: 1,
+      playbackId: 'play-1',
+      itemId: 'item-1',
+      status: 'playing',
+      title: 'Test Movie',
+      playMethod: 'DirectPlay',
+      playbackRate: 1,
+      isBuffering: false,
+    });
+    expect(raw).not.toContain('secret');
+    expect(raw).not.toContain('Authorization');
+    expect(raw).not.toContain('https://');
+  });
+
+  it('heartbeats preparing playback without sending a premature Jellyfin progress report', async () => {
+    const { runtime, api, transport } = createRuntime();
+    seedSession(runtime, 'preparing');
+
+    await (runtime as unknown as { periodicProgress(): Promise<void> }).periodicProgress();
+
+    expect(api.file.write).toHaveBeenCalledOnce();
+    expect(JSON.parse(api.file.write.mock.calls[0]?.[1] as string)).toMatchObject({
+      playbackId: launch.nonce,
+      status: 'preparing',
+    });
+    expect(transport.execute).not.toHaveBeenCalled();
   });
 
   it('drops header injection attempts', () => {
@@ -351,6 +397,43 @@ describe('player runtime boundaries', () => {
     expect(transport.execute.mock.calls[0]?.[0]).toMatchObject({
       url: 'https://media.test/Sessions/Playing',
       body: { ItemId: 'item-1' },
+    });
+  });
+
+  it('publishes playing state before a delayed Jellyfin start report settles', async () => {
+    const { runtime, transport, api } = createRuntime();
+    seedSession(runtime, 'preparing');
+    let finishReport: (() => void) | undefined;
+    transport.execute.mockImplementationOnce(
+      () => new Promise<unknown>((resolve) => (finishReport = () => resolve({}))),
+    );
+
+    const loading = (runtime as unknown as { mediaLoaded(): Promise<void> }).mediaLoaded();
+
+    expect(api.file.write).toHaveBeenCalledOnce();
+    expect(JSON.parse(api.file.write.mock.calls[0]?.[1] as string)).toMatchObject({
+      status: 'playing',
+      itemId: 'item-1',
+    });
+    await vi.waitFor(() => expect(transport.execute).toHaveBeenCalledOnce());
+    finishReport?.();
+    await loading;
+  });
+
+  it('publishes paused when mpv is already paused before file-loaded', async () => {
+    const { runtime, transport, api } = createRuntime();
+    seedSession(runtime, 'preparing');
+    api.mpv.getFlag.mockReturnValue(true);
+
+    await (runtime as unknown as { mediaLoaded(): Promise<void> }).mediaLoaded();
+
+    expect(JSON.parse(api.file.write.mock.calls[0]?.[1] as string)).toMatchObject({
+      status: 'paused',
+      itemId: 'item-1',
+    });
+    expect(transport.execute.mock.calls[0]?.[0]).toMatchObject({
+      url: 'https://media.test/Sessions/Playing',
+      body: { IsPaused: true },
     });
   });
 

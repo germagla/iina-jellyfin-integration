@@ -3,6 +3,8 @@ import {
   BridgeRequestSchema,
   CATALOG_DIAGNOSTIC_MESSAGE,
   CATALOG_READY_MESSAGE,
+  PLAYBACK_STATE_MESSAGE,
+  PLAYBACK_STATE_REMOVED_MESSAGE,
   parseBridgeResult,
   type AuthenticatedApiContext,
   type BridgeOperation,
@@ -11,6 +13,8 @@ import {
   type AuthenticatedConnection,
   type ConnectionMetadata,
   type PlaybackRequest,
+  type PublicPlaybackState,
+  type PublicPlaybackStateRemoval,
 } from '@iina-jellyfin/core';
 import { ArtworkCache } from './artwork-cache';
 import { toBridgeError } from './bridge-error';
@@ -40,6 +44,11 @@ import {
   type PlayerLaunch,
 } from './player-messages';
 import { PlaybackConfirmationStore } from './playback-confirmations';
+import {
+  playbackStatePath,
+  prunePlaybackStateFiles,
+  readPlaybackStates,
+} from './playback-state-mailbox';
 import { SafeLogger } from './safe-logger';
 
 const api = iina;
@@ -90,6 +99,22 @@ let catalogOpenRequested = false;
 const PENDING_LAUNCH_TTL_MS = 30_000;
 const MAX_CATALOG_DIAGNOSTICS_PER_ENTRY = 32;
 const SESSION_REVOCATION_GRACE_MS = 2_500;
+const ACTIVE_PLAYBACK_STATE_TIMEOUT_MS = 35_000;
+const TERMINAL_PLAYBACK_STATE_RETENTION_MS = 30_000;
+const UNOBSERVED_PLAYBACK_RETENTION_MS = 5 * 60_000;
+const AUTH_BOUNDARY_FINAL_CLEANUP_MS = 60_000;
+const MAX_TRACKED_PLAYBACKS = 64;
+const launchedPlaybackIds = new Map<string, number>();
+const publishedPlaybackStates = new Map<
+  string,
+  {
+    generation: number;
+    sequence: number;
+    status: PublicPlaybackState['status'];
+    updatedAtMs: number;
+    terminalPublishedAtMs?: number;
+  }
+>();
 
 function staleRequest(): Error & { code: string } {
   const error = new Error('The connection changed before this request completed.') as Error & {
@@ -166,12 +191,75 @@ function stopTrackedPlayers(reason: 'closed' | 'replaced' | 'user'): void {
   playbackConfirmations.clear();
 }
 
+function deletePlaybackStateFile(playbackId: string): void {
+  try {
+    api.file.delete(playbackStatePath(playbackId));
+  } catch {
+    // Temporary playback status cleanup is best-effort.
+  }
+}
+
+function postPlaybackStateRemoval(
+  playbackId: string,
+  previous: { generation: number; sequence: number },
+): void {
+  const removal: PublicPlaybackStateRemoval = {
+    version: 1,
+    playbackId,
+    generation: previous.generation,
+    sequence: previous.sequence,
+    removedAtMs: Date.now(),
+  };
+  api.standaloneWindow.postMessage(PLAYBACK_STATE_REMOVED_MESSAGE, removal);
+}
+
+function forgetPlayback(playbackId: string): void {
+  const previous = publishedPlaybackStates.get(playbackId);
+  if (previous !== undefined) postPlaybackStateRemoval(playbackId, previous);
+  publishedPlaybackStates.delete(playbackId);
+  launchedPlaybackIds.delete(playbackId);
+  deletePlaybackStateFile(playbackId);
+}
+
+function suspendPlaybackState(playbackId: string, now: number): void {
+  const previous = publishedPlaybackStates.get(playbackId);
+  if (previous !== undefined) postPlaybackStateRemoval(playbackId, previous);
+  publishedPlaybackStates.delete(playbackId);
+  // Retain the exact launch allowlist so a higher-sequence heartbeat can recover
+  // after Mac sleep, app suspension, or timer throttling. The separate orphan
+  // timeout below still bounds sessions whose player entry is truly gone.
+  launchedPlaybackIds.set(playbackId, now);
+  deletePlaybackStateFile(playbackId);
+}
+
+function resetPlaybackStateBoundary(): void {
+  const playbackIds = new Set([...launchedPlaybackIds.keys(), ...publishedPlaybackStates.keys()]);
+  for (const [playbackId, previous] of publishedPlaybackStates) {
+    postPlaybackStateRemoval(playbackId, previous);
+  }
+  publishedPlaybackStates.clear();
+  launchedPlaybackIds.clear();
+  prunePlaybackStateFiles(api.file);
+  // A player stopped at this boundary may publish one final terminal snapshot
+  // after handling its queued stop message. It is no longer allowlisted, and a
+  // second bounded cleanup removes that late temporary file.
+  const deleteBoundaryFiles = (): void => {
+    for (const playbackId of playbackIds) deletePlaybackStateFile(playbackId);
+    // Also catch a late write from a player that was capacity-evicted before
+    // this boundary, while preserving any newly authenticated tracked session.
+    prunePlaybackStateFiles(api.file, new Set(launchedPlaybackIds.keys()));
+  };
+  setTimeout(deleteBoundaryFiles, SESSION_REVOCATION_GRACE_MS + 100);
+  setTimeout(deleteBoundaryFiles, AUTH_BOUNDARY_FINAL_CLEANUP_MS);
+}
+
 function beginAuthenticationAttempt(): number {
   connectionGeneration += 1;
   quickConnectAttempt = undefined;
   quickConnectGeneration = connectionGeneration;
   pendingLaunches.clear();
   playbackConfirmations.clear();
+  resetPlaybackStateBoundary();
   stopTrackedPlayers('closed');
   return connectionGeneration;
 }
@@ -303,6 +391,87 @@ function respondError(
   api.standaloneWindow.postMessage(BRIDGE_RESPONSE_MESSAGE, response);
 }
 
+function rememberLaunchedPlayback(playbackId: string): void {
+  launchedPlaybackIds.set(playbackId, Date.now());
+  if (launchedPlaybackIds.size <= MAX_TRACKED_PLAYBACKS) return;
+  const oldest = [...launchedPlaybackIds.entries()].sort((left, right) => left[1] - right[1])[0];
+  if (oldest === undefined) return;
+  forgetPlayback(oldest[0]);
+}
+
+function postPlaybackStates(force = false): void {
+  const now = Date.now();
+  const allowed = new Set(launchedPlaybackIds.keys());
+  const states = readPlaybackStates(api.file, allowed, MAX_TRACKED_PLAYBACKS);
+  const observedPlaybackIds = new Set(states.map(({ playbackId }) => playbackId));
+  for (const state of states) {
+    const active =
+      state.status === 'preparing' || state.status === 'playing' || state.status === 'paused';
+    const previous = publishedPlaybackStates.get(state.playbackId);
+    if (active && now - state.updatedAtMs > ACTIVE_PLAYBACK_STATE_TIMEOUT_MS) {
+      suspendPlaybackState(state.playbackId, now);
+      continue;
+    }
+    if (
+      !active &&
+      previous?.terminalPublishedAtMs !== undefined &&
+      now - previous.terminalPublishedAtMs >= TERMINAL_PLAYBACK_STATE_RETENTION_MS
+    ) {
+      forgetPlayback(state.playbackId);
+      continue;
+    }
+    const newer =
+      previous === undefined ||
+      state.generation > previous.generation ||
+      (state.generation === previous.generation && state.sequence > previous.sequence);
+    if (!force && !newer) continue;
+    const firstTerminal = !active && previous?.terminalPublishedAtMs === undefined;
+    publishedPlaybackStates.set(state.playbackId, {
+      generation: state.generation,
+      sequence: state.sequence,
+      status: state.status,
+      updatedAtMs: state.updatedAtMs,
+      ...(!active ? { terminalPublishedAtMs: previous?.terminalPublishedAtMs ?? now } : {}),
+    });
+    api.standaloneWindow.postMessage(PLAYBACK_STATE_MESSAGE, state);
+    if (firstTerminal) {
+      // The stopped report is queued independently in the player entry. Give it
+      // a moment to reach Jellyfin, then refresh REST-backed progress while the
+      // terminal snapshot remains visible for a short status grace period.
+      const terminalConnectionGeneration = connectionGeneration;
+      setTimeout(() => {
+        if (terminalConnectionGeneration !== connectionGeneration) return;
+        api.standaloneWindow.postMessage('catalog.invalidated', { reason: 'playback' });
+      }, 1_000);
+    }
+  }
+
+  for (const [playbackId, launchedAtMs] of launchedPlaybackIds) {
+    if (
+      observedPlaybackIds.has(playbackId) ||
+      publishedPlaybackStates.has(playbackId) ||
+      now - launchedAtMs <= UNOBSERVED_PLAYBACK_RETENTION_MS
+    ) {
+      continue;
+    }
+    forgetPlayback(playbackId);
+  }
+
+  for (const [playbackId, previous] of publishedPlaybackStates) {
+    const active =
+      previous.status === 'preparing' ||
+      previous.status === 'playing' ||
+      previous.status === 'paused';
+    const staleActive = active && now - previous.updatedAtMs > ACTIVE_PLAYBACK_STATE_TIMEOUT_MS;
+    const expiredTerminal =
+      !active &&
+      previous.terminalPublishedAtMs !== undefined &&
+      now - previous.terminalPublishedAtMs >= TERMINAL_PLAYBACK_STATE_RETENTION_MS;
+    if (staleActive) suspendPlaybackState(playbackId, now);
+    else if (expiredTerminal) forgetPlayback(playbackId);
+  }
+}
+
 async function prepareLaunch(request: PlaybackRequest): Promise<{
   launch: PlayerLaunch;
   publicPlan: ReturnType<typeof publicPlaybackResult>;
@@ -346,7 +515,8 @@ async function deliverPreparedLaunch(
       assertManagedPlaybackSequence(managedSequence);
       api.global.postMessage(playerId, PLAYER_MESSAGES.launch, launch);
     });
-    return { status: 'started', plan: publicPlan };
+    rememberLaunchedPlayback(launch.nonce);
+    return { status: 'started', playbackId: launch.nonce, plan: publicPlan };
   }
 
   const nonce = launch.nonce;
@@ -402,12 +572,13 @@ async function deliverPreparedLaunch(
       // remains tracked for cleanup/reuse but can never steal managed ownership.
       if (!request.openInNewWindow) managedPlayerId = playerId;
     });
+    rememberLaunchedPlayback(launch.nonce);
     pendingLaunches.delete(nonce);
   } catch (error) {
     pendingLaunches.delete(nonce);
     throw error;
   }
-  return { status: 'started', plan: publicPlan };
+  return { status: 'started', playbackId: launch.nonce, plan: publicPlan };
 }
 
 async function launchPlayback(request: PlaybackRequest): Promise<unknown> {
@@ -551,6 +722,7 @@ async function handleBridgeRequest(raw: unknown): Promise<void> {
         quickConnectGeneration = connectionGeneration;
         pendingLaunches.clear();
         playbackConfirmations.clear();
+        resetPlaybackStateBoundary();
         stopTrackedPlayers('closed');
         if (context !== undefined) {
           // Player cores keep their own in-memory context long enough to send
@@ -612,6 +784,7 @@ function postCatalogVisible(): void {
     api.standaloneWindow.postMessage('catalog.visible', {
       connection: publicConnection(connectionStore.readMetadata()),
     });
+    postPlaybackStates(true);
   }, 50);
 }
 
@@ -621,14 +794,16 @@ function openCatalog(): void {
   if (catalogReady) postCatalogVisible();
 }
 
-function markCatalogReady(): void {
-  if (catalogReady) return;
+function markCatalogReady(replay: boolean): void {
+  const firstReady = !catalogReady;
   catalogReady = true;
   if (!catalogOpenRequested) return;
-  // A second open after the document mounts forces IINA 1.4.4 to paint a
-  // standalone WKWebView that was opened during its cold-load window.
-  api.standaloneWindow.open();
-  postCatalogVisible();
+  if (firstReady) {
+    // A second open after the document mounts forces IINA 1.4.4 to paint a
+    // standalone WKWebView that was opened during its cold-load window.
+    api.standaloneWindow.open();
+  }
+  if (firstReady || replay) postCatalogVisible();
 }
 
 api.standaloneWindow.loadFile('dist/ui/catalog/index.html');
@@ -643,10 +818,10 @@ api.standaloneWindow.onMessage(BRIDGE_REQUEST_MESSAGE, (data) => {
   // A first bridge request also proves the catalog mounted. This closes the
   // narrow race where catalog.ready can be posted while loadFile is still
   // returning and before IINA has installed this entry's message handler.
-  markCatalogReady();
+  markCatalogReady(false);
   void handleBridgeRequest(data);
 });
-api.standaloneWindow.onMessage(CATALOG_READY_MESSAGE, () => markCatalogReady());
+api.standaloneWindow.onMessage(CATALOG_READY_MESSAGE, () => markCatalogReady(true));
 api.standaloneWindow.onMessage(CATALOG_DIAGNOSTIC_MESSAGE, (data) => {
   const record = parseCatalogDiagnosticRecord(data);
   if (record === undefined) return;
@@ -668,9 +843,11 @@ setInterval(() => {
   try {
     if (consumeCatalogOpenRequest(api.preferences)) openCatalog();
     if (consumeDiagnosticLogRevealRequest(api.preferences)) diagnosticLog.reveal();
+    postPlaybackStates();
   } catch (error) {
-    logger.warn('Could not handle a request from plugin preferences', error);
+    logger.warn('Could not process global Jellyfin housekeeping', error);
   }
 }, 500);
 
 logger.info('Global Jellyfin integration ready');
+prunePlaybackStateFiles(api.file);

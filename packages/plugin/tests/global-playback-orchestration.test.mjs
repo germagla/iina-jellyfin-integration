@@ -7,6 +7,9 @@ const BRIDGE_REQUEST_MESSAGE = 'bridge.request';
 const BRIDGE_RESPONSE_MESSAGE = 'bridge.response';
 const PLAYER_LAUNCH_MESSAGE = 'jellyfin.player.launch';
 const PLAYER_STOP_MESSAGE = 'jellyfin.player.stop';
+const PLAYBACK_STATE_MESSAGE = 'playback.state';
+const PLAYBACK_STATE_REMOVED_MESSAGE = 'playback.state.removed';
+const CATALOG_READY_MESSAGE = 'catalog.ready';
 
 let globalBundle;
 
@@ -94,6 +97,24 @@ function playbackRequest(requestId, itemId, overrides = {}) {
   };
 }
 
+function publicPlaybackState(playbackId, itemId, overrides = {}) {
+  return {
+    version: 1,
+    playbackId,
+    sequence: 1,
+    generation: 1,
+    status: 'playing',
+    itemId,
+    positionTicks: 100,
+    durationTicks: 1_000,
+    title: `Episode ${itemId}`,
+    playMethod: 'DirectPlay',
+    startedAtMs: Date.now(),
+    updatedAtMs: Date.now(),
+    ...overrides,
+  };
+}
+
 function createHarness({ createPlayerError } = {}) {
   const metadata = {
     schemaVersion: 1,
@@ -125,10 +146,12 @@ function createHarness({ createPlayerError } = {}) {
   const requests = [];
   const timers = [];
   const files = new Map();
+  const menuItems = [];
   const deferredDetails = new Map();
   let nextTimerId = 1;
   let nextPlayerId = 41;
   let currentTimerDelay;
+  let nowMs = 1_721_190_400_000;
 
   const fileApi = {
     exists(filePath) {
@@ -145,7 +168,11 @@ function createHarness({ createPlayerError } = {}) {
       files.delete(filePath);
     },
     list() {
-      return [];
+      return [...files.keys()].map((filePath) => ({
+        filename: filePath.startsWith('@tmp/') ? filePath.slice('@tmp/'.length) : filePath,
+        path: filePath,
+        isDir: false,
+      }));
     },
     showInFinder() {},
     handle(filePath) {
@@ -237,7 +264,9 @@ function createHarness({ createPlayerError } = {}) {
       item(title, action, options) {
         return { title, action, options };
       },
-      addItem() {},
+      addItem(item) {
+        menuItems.push(item);
+      },
     },
     global: {
       createPlayerInstance(options) {
@@ -261,16 +290,28 @@ function createHarness({ createPlayerError } = {}) {
     },
   };
 
-  function schedule(callback, delay = 0) {
-    const timer = { id: nextTimerId++, callback, delay };
+  function schedule(callback, delay = 0, repeat = false) {
+    const timer = { id: nextTimerId++, callback, delay, repeat };
     timers.push(timer);
     return timer.id;
   }
 
+  class HarnessDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) super(nowMs);
+      else super(...args);
+    }
+
+    static now() {
+      return nowMs;
+    }
+  }
+
   const sandbox = {
     iina,
-    setTimeout: schedule,
-    setInterval: schedule,
+    Date: HarnessDate,
+    setTimeout: (callback, delay) => schedule(callback, delay, false),
+    setInterval: (callback, delay) => schedule(callback, delay, true),
     clearTimeout() {},
     clearInterval() {},
   };
@@ -291,6 +332,23 @@ function createHarness({ createPlayerError } = {}) {
     } finally {
       currentTimerDelay = undefined;
     }
+    if (timer.repeat) timers.push(timer);
+    await flushMicrotasks();
+    return true;
+  }
+
+  async function runNextTimerWithDelay(delay) {
+    await flushMicrotasks();
+    const index = timers.findIndex((timer) => timer.delay === delay);
+    if (index < 0) return false;
+    const [timer] = timers.splice(index, 1);
+    currentTimerDelay = timer.delay;
+    try {
+      timer.callback();
+    } finally {
+      currentTimerDelay = undefined;
+    }
+    if (timer.repeat) timers.push(timer);
     await flushMicrotasks();
     return true;
   }
@@ -331,6 +389,9 @@ function createHarness({ createPlayerError } = {}) {
 
   return {
     accessToken,
+    advanceTime(milliseconds) {
+      nowMs += milliseconds;
+    },
     bridgeResponse,
     deferDetails(itemId) {
       const gate = deferred();
@@ -340,13 +401,28 @@ function createHarness({ createPlayerError } = {}) {
     drainMainTimers,
     files,
     flushMicrotasks,
+    emitStandalone(name, payload) {
+      const handler = standaloneHandlers.get(name);
+      if (handler === undefined) throw new Error(`Global did not register ${name}.`);
+      handler(payload);
+    },
     nativeCalls,
+    now() {
+      return nowMs;
+    },
+    openCatalog() {
+      const item = menuItems.find(({ title }) => title === 'Open Jellyfin Library');
+      if (item === undefined) throw new Error('Global did not register the catalog menu item.');
+      item.action();
+    },
     preferences,
     request,
     requests,
     runNextMainTimer,
+    runNextTimerWithDelay,
     send,
     settleBridgeRequest,
+    standaloneMessages,
   };
 }
 
@@ -440,6 +516,209 @@ describe('bundled Global playback orchestration', () => {
       'episode-managed-next',
     ]);
     expectAllNativeCallsOnIinaMainLoop(harness);
+  });
+
+  it('relays concurrent validated playback mailboxes and ignores unknown players', async () => {
+    const harness = createHarness();
+    const managed = await harness.request(
+      playbackRequest('relay-managed', 'episode-relay-managed'),
+    );
+    const separate = await harness.request(
+      playbackRequest('relay-separate', 'episode-relay-separate', { openInNewWindow: true }),
+    );
+    const managedId = managed.result.playbackId;
+    const separateId = separate.result.playbackId;
+    harness.files.set(
+      `@tmp/jellyfin-playback-state-${managedId}.json`,
+      JSON.stringify(publicPlaybackState(managedId, 'episode-relay-managed')),
+    );
+    harness.files.set(
+      `@tmp/jellyfin-playback-state-${separateId}.json`,
+      JSON.stringify(publicPlaybackState(separateId, 'episode-relay-separate')),
+    );
+    harness.files.set(
+      '@tmp/jellyfin-playback-state-play-unknown.json',
+      JSON.stringify(publicPlaybackState('play-unknown', 'episode-unknown')),
+    );
+
+    expect(await harness.runNextTimerWithDelay(500)).toBe(true);
+
+    const relayed = harness.standaloneMessages.filter(
+      ({ name }) => name === PLAYBACK_STATE_MESSAGE,
+    );
+    expect(relayed.map(({ payload }) => payload.playbackId).sort()).toEqual(
+      [managedId, separateId].sort(),
+    );
+    expect(relayed.some(({ payload }) => payload.itemId === 'episode-unknown')).toBe(false);
+  });
+
+  it('expires terminal state, deletes its temporary mailbox, and sends a revisioned removal', async () => {
+    const harness = createHarness();
+    const response = await harness.request(
+      playbackRequest('terminal-retention', 'episode-terminal'),
+    );
+    const playbackId = response.result.playbackId;
+    const path = `@tmp/jellyfin-playback-state-${playbackId}.json`;
+    harness.files.set(
+      path,
+      JSON.stringify(
+        publicPlaybackState(playbackId, 'episode-terminal', {
+          sequence: 4,
+          status: 'stopped',
+          stopReason: 'user',
+        }),
+      ),
+    );
+
+    expect(await harness.runNextTimerWithDelay(500)).toBe(true);
+    expect(
+      harness.standaloneMessages.some(
+        ({ name, payload }) => name === PLAYBACK_STATE_MESSAGE && payload.playbackId === playbackId,
+      ),
+    ).toBe(true);
+
+    harness.advanceTime(30_000);
+    expect(await harness.runNextTimerWithDelay(500)).toBe(true);
+
+    expect(harness.files.has(path)).toBe(false);
+    expect(
+      harness.standaloneMessages.find(
+        ({ name, payload }) =>
+          name === PLAYBACK_STATE_REMOVED_MESSAGE && payload.playbackId === playbackId,
+      )?.payload,
+    ).toMatchObject({
+      version: 1,
+      playbackId,
+      generation: 1,
+      sequence: 4,
+    });
+  });
+
+  it('recovers a higher-sequence active heartbeat after a long timer gap', async () => {
+    const harness = createHarness();
+    const response = await harness.request(playbackRequest('sleep-gap', 'episode-sleep-gap'));
+    const playbackId = response.result.playbackId;
+    const path = `@tmp/jellyfin-playback-state-${playbackId}.json`;
+    harness.files.set(
+      path,
+      JSON.stringify(
+        publicPlaybackState(playbackId, 'episode-sleep-gap', {
+          updatedAtMs: harness.now(),
+        }),
+      ),
+    );
+    await harness.runNextTimerWithDelay(500);
+
+    harness.advanceTime(36_000);
+    await harness.runNextTimerWithDelay(500);
+    expect(harness.files.has(path)).toBe(false);
+    expect(
+      harness.standaloneMessages.some(
+        ({ name, payload }) =>
+          name === PLAYBACK_STATE_REMOVED_MESSAGE && payload.playbackId === playbackId,
+      ),
+    ).toBe(true);
+
+    harness.files.set(
+      path,
+      JSON.stringify(
+        publicPlaybackState(playbackId, 'episode-sleep-gap', {
+          sequence: 2,
+          positionTicks: 200,
+          updatedAtMs: harness.now(),
+        }),
+      ),
+    );
+    await harness.runNextTimerWithDelay(500);
+
+    expect(
+      harness.standaloneMessages.some(
+        ({ name, payload }) =>
+          name === PLAYBACK_STATE_MESSAGE &&
+          payload.playbackId === playbackId &&
+          payload.sequence === 2,
+      ),
+    ).toBe(true);
+  });
+
+  it('clears relayed playback metadata at disconnect and ignores late player state', async () => {
+    const harness = createHarness();
+    const response = await harness.request(
+      playbackRequest('disconnect-state', 'episode-disconnect'),
+    );
+    const playbackId = response.result.playbackId;
+    const path = `@tmp/jellyfin-playback-state-${playbackId}.json`;
+    harness.files.set(
+      path,
+      JSON.stringify(publicPlaybackState(playbackId, 'episode-disconnect', { sequence: 2 })),
+    );
+    await harness.runNextTimerWithDelay(500);
+
+    await harness.request({
+      operation: 'connection.disconnect',
+      requestId: 'disconnect-after-state',
+      payload: {},
+    });
+
+    expect(harness.files.has(path)).toBe(false);
+    expect(
+      harness.standaloneMessages.some(
+        ({ name, payload }) =>
+          name === PLAYBACK_STATE_REMOVED_MESSAGE && payload.playbackId === playbackId,
+      ),
+    ).toBe(true);
+
+    harness.files.set(
+      path,
+      JSON.stringify(
+        publicPlaybackState(playbackId, 'episode-disconnect', {
+          sequence: 3,
+          status: 'stopped',
+          stopReason: 'closed',
+        }),
+      ),
+    );
+    const relayedBefore = harness.standaloneMessages.filter(
+      ({ name }) => name === PLAYBACK_STATE_MESSAGE,
+    ).length;
+    await harness.runNextTimerWithDelay(500);
+    expect(
+      harness.standaloneMessages.filter(({ name }) => name === PLAYBACK_STATE_MESSAGE),
+    ).toHaveLength(relayedBefore);
+
+    const untrackedLatePath = '@tmp/jellyfin-playback-state-play-evicted-before-disconnect.json';
+    harness.files.set(untrackedLatePath, 'late-evicted-terminal-state');
+    expect(await harness.runNextTimerWithDelay(2_600)).toBe(true);
+    expect(harness.files.has(path)).toBe(false);
+    expect(harness.files.has(untrackedLatePath)).toBe(false);
+    harness.files.set(path, 'late-terminal-state');
+    expect(await harness.runNextTimerWithDelay(60_000)).toBe(true);
+    expect(harness.files.has(path)).toBe(false);
+  });
+
+  it('replays current playback when a recreated catalog document announces readiness', async () => {
+    const harness = createHarness();
+    const response = await harness.request(playbackRequest('ready-replay', 'episode-ready'));
+    const playbackId = response.result.playbackId;
+    harness.files.set(
+      `@tmp/jellyfin-playback-state-${playbackId}.json`,
+      JSON.stringify(publicPlaybackState(playbackId, 'episode-ready')),
+    );
+    await harness.runNextTimerWithDelay(500);
+    harness.openCatalog();
+    await harness.runNextTimerWithDelay(50);
+    const visibleRelays = harness.standaloneMessages.filter(
+      ({ name }) => name === PLAYBACK_STATE_MESSAGE,
+    ).length;
+
+    // Simulate a new WKWebView document announcing readiness after the initial mount.
+    harness.emitStandalone(CATALOG_READY_MESSAGE, {});
+    // A ready replay is delayed by the same 50 ms paint workaround as a normal open.
+    await harness.runNextTimerWithDelay(50);
+
+    expect(
+      harness.standaloneMessages.filter(({ name }) => name === PLAYBACK_STATE_MESSAGE),
+    ).toHaveLength(visibleRelays + 1);
   });
 
   it('does not let a superseded created core steal managed ownership before delivery', async () => {

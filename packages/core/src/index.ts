@@ -7,6 +7,7 @@ export * from './device-profile';
 export * from './jellyfin-schemas';
 export * from './persistence';
 export * from './playback';
+export * from './playback-state';
 export * from './portable-url';
 export * from './preference-contracts';
 export * from './redaction';

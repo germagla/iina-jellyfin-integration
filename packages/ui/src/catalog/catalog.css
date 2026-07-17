@@ -733,6 +733,10 @@ select:focus-visible {
   font-size: 12px;
 }
 
+.play-button--active:disabled {
+  opacity: 1;
+}
+
 .tertiary-button {
   display: inline-flex;
   align-items: center;
@@ -790,6 +794,22 @@ select:focus-visible {
 
 .playback-notice {
   color: #78d998;
+}
+
+.playback-notice--preparing svg {
+  color: var(--accent);
+}
+
+.playback-notice--paused {
+  color: #f2c66d;
+}
+
+.playback-notice--stopped {
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.playback-notice--error {
+  color: var(--danger);
 }
 
 .playback-error {

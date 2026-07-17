@@ -13,10 +13,12 @@ import {
   ticksToSeconds,
   type PlaybackProgressEventName,
   type PlaybackSessionState,
+  type PublicPlaybackState,
 } from '@iina-jellyfin/core';
 import { DEFAULT_PROGRESS_INTERVAL_MS, PLAYER_MESSAGES } from './constants';
 import type { IinaHttpTransport } from './iina-http';
 import type { PlayerLaunch } from './player-messages';
+import { writePlaybackState } from './playback-state-mailbox';
 import type { SafeLogger } from './safe-logger';
 
 interface PlayerApi {
@@ -122,6 +124,9 @@ export class PlayerRuntime {
   private pendingCoreStopAcknowledgement: (() => void) | undefined;
   private loadSequence = 0;
   private activeLoadReplacementSequence: number | undefined;
+  private playbackStateSequence = 0;
+  private playbackStartedAtMs = 0;
+  private playbackStatePersistenceFailed = false;
 
   constructor(
     private readonly api: PlayerApi,
@@ -148,6 +153,8 @@ export class PlayerRuntime {
     this.api.event.on('iina.window-loaded', () => this.loadPlayerViews());
     this.api.event.on('iina.file-loaded', () => void this.mediaLoaded());
     this.api.event.on('mpv.pause.changed', () => void this.pauseChanged());
+    this.api.event.on('mpv.speed.changed', () => this.playbackTimingChanged());
+    this.api.event.on('mpv.paused-for-cache.changed', () => this.playbackTimingChanged());
     this.api.event.on('mpv.seek', () => void this.reportImmediate('seek'));
     this.api.event.on('mpv.end-file', () => {
       this.handleEndFile();
@@ -243,7 +250,13 @@ export class PlayerRuntime {
       this.launch = launch;
       this.activeLoadReplacementSequence = pending.replacementSequence;
       this.session = beginPlaybackSession(this.session, launch.plan);
+      this.playbackStartedAtMs = Date.now();
       const generation = this.session.generation;
+      // A successful Global handoff is not yet proof that mpv accepted the
+      // media. Publish the preparing state immediately so the catalog can
+      // acknowledge the exact native session even during slow subtitle/network
+      // setup, and can distinguish it from a launch that never reached here.
+      this.publishState();
       this.logger.info('player.plan.received', {
         correlation: launch.diagnosticCorrelation,
         playMethod: launch.plan.playMethod,
@@ -393,16 +406,28 @@ export class PlayerRuntime {
       positionTicks: this.launch.plan.startPositionTicks,
       durationTicks: this.readDurationTicks(),
     });
+    // mpv can already be paused before iina.file-loaded is emitted. In that
+    // ordering no later pause-change notification is guaranteed, so reconcile
+    // the native flag before publishing the first loaded state.
+    if (this.api.mpv.getFlag('pause')) {
+      this.session = reducePlaybackSession(this.session, {
+        type: 'pause',
+        generation,
+        positionTicks: this.session.positionTicks,
+      });
+    }
     this.logger.info('player.media.loaded', {
       correlation: this.launch.diagnosticCorrelation,
       playMethod: this.launch.plan.playMethod,
       resumed: this.launch.plan.startPositionTicks > 0,
     });
+    // The catalog and player views should reflect native playback immediately;
+    // Jellyfin reporting remains serialized but must not delay local UI state.
+    this.publishState();
     if (this.startedGeneration !== generation) {
       this.startedGeneration = generation;
       await this.sendReport('start');
     }
-    this.publishState();
   }
 
   private loadExternalSubtitleTrack(): void {
@@ -496,8 +521,8 @@ export class PlayerRuntime {
       generation: this.session.generation,
       positionTicks: this.session.positionTicks,
     });
-    await this.sendReport('progress', paused ? 'pause' : 'unpause');
     this.publishState();
+    await this.sendReport('progress', paused ? 'pause' : 'unpause');
   }
 
   private async reportImmediate(eventName: PlaybackProgressEventName): Promise<void> {
@@ -513,16 +538,37 @@ export class PlayerRuntime {
       generation: this.session.generation,
       positionTicks: this.session.positionTicks,
     });
+    this.publishState();
     await this.sendReport('progress', eventName);
+  }
+
+  private playbackTimingChanged(): void {
+    if (
+      this.launch === undefined ||
+      (this.session.status !== 'playing' && this.session.status !== 'paused')
+    ) {
+      return;
+    }
+    this.updatePosition();
     this.publishState();
   }
 
   private async periodicProgress(): Promise<void> {
+    if (
+      this.launch !== undefined &&
+      (this.session.status === 'preparing' || this.session.status === 'paused')
+    ) {
+      // Preparing and paused players do not send periodic Jellyfin progress
+      // reports, but their heartbeat keeps live catalog status from expiring.
+      if (this.session.status === 'paused') this.updatePosition();
+      this.publishState();
+      return;
+    }
     if (!shouldReportPeriodicProgress(this.session, Date.now(), DEFAULT_PROGRESS_INTERVAL_MS))
       return;
     this.updatePosition();
-    await this.sendReport('progress', 'timeupdate');
     this.publishState();
+    await this.sendReport('progress', 'timeupdate');
   }
 
   private async sendReport(
@@ -892,6 +938,48 @@ export class PlayerRuntime {
     };
     if (this.sidebarReady) this.api.sidebar.postMessage('player.state', state);
     if (this.overlayReady) this.api.overlay.postMessage('player.state', state);
+    this.persistPublicPlaybackState();
+  }
+
+  private persistPublicPlaybackState(): void {
+    const launch = this.launch;
+    if (launch === undefined || this.session.status === 'idle') return;
+    const state: PublicPlaybackState = {
+      version: 1,
+      playbackId: launch.nonce,
+      sequence: ++this.playbackStateSequence,
+      generation: this.session.generation,
+      status: this.session.status,
+      itemId: launch.plan.itemId,
+      positionTicks: this.session.positionTicks,
+      title: launch.display.title,
+      playMethod: launch.plan.playMethod,
+      startedAtMs: this.playbackStartedAtMs,
+      updatedAtMs: Date.now(),
+      isBuffering: this.api.mpv.getFlag('paused-for-cache'),
+    };
+    const playbackRate = this.api.mpv.getNumber('speed');
+    if (Number.isFinite(playbackRate) && playbackRate >= 0.01 && playbackRate <= 100) {
+      state.playbackRate = playbackRate;
+    }
+    if (this.session.durationTicks !== undefined) state.durationTicks = this.session.durationTicks;
+    if (launch.display.seriesName !== undefined) state.seriesName = launch.display.seriesName;
+    if (launch.display.seasonNumber !== undefined) {
+      state.seasonNumber = launch.display.seasonNumber;
+    }
+    if (launch.display.episodeNumber !== undefined) {
+      state.episodeNumber = launch.display.episodeNumber;
+    }
+    if (this.session.stopReason !== undefined) state.stopReason = this.session.stopReason;
+
+    try {
+      writePlaybackState(this.api.file, state);
+      this.playbackStatePersistenceFailed = false;
+    } catch (error) {
+      if (this.playbackStatePersistenceFailed) return;
+      this.playbackStatePersistenceFailed = true;
+      this.logger.warn('Could not publish playback state to the Jellyfin catalog', error);
+    }
   }
 
   private receiveUpNext(raw: unknown): void {

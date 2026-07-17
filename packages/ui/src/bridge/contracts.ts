@@ -3,6 +3,7 @@ import type {
   BridgeRequest as CoreBridgeRequest,
   CatalogRequest,
   PlaybackRequest,
+  PublicPlaybackState,
 } from '@iina-jellyfin/core';
 
 export type BridgeOperation = CoreBridgeOperation;
@@ -116,6 +117,7 @@ export interface BridgeResultMap {
   'playback.start':
     | {
         status: 'started';
+        playbackId: string;
         plan: {
           playMethod: 'DirectPlay' | 'DirectStream' | 'Transcode';
           conversion: 'none' | 'container' | 'audio' | 'video';
@@ -169,6 +171,8 @@ export interface CatalogBridge {
     payload: BridgePayload<K>,
   ): Promise<BridgeResultMap[K]>;
   subscribeInvalidation?(listener: () => void): () => void;
+  getPlaybackStates?(): PublicPlaybackState[];
+  subscribePlaybackStates?(listener: (states: PublicPlaybackState[]) => void): () => void;
 }
 
-export type { CatalogRequest, PlaybackRequest };
+export type { CatalogRequest, PlaybackRequest, PublicPlaybackState };

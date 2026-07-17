@@ -1,4 +1,13 @@
-import { BridgeResponseSchema, parseBridgeResult } from '@iina-jellyfin/core';
+import {
+  BridgeResponseSchema,
+  PLAYBACK_STATE_MESSAGE,
+  PLAYBACK_STATE_REMOVED_MESSAGE,
+  parseBridgeResult,
+  parsePublicPlaybackState,
+  parsePublicPlaybackStateRemoval,
+  type PublicPlaybackState,
+  type PublicPlaybackStateRemoval,
+} from '@iina-jellyfin/core';
 import { demoHome, demoMovies, demoShowDetails, demoShows } from '../demo/catalog';
 import type {
   BridgeOperation,
@@ -31,6 +40,15 @@ type PendingRequest = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+const MAX_CACHED_PLAYBACK_STATES = 64;
+const MAX_PLAYBACK_STATE_TOMBSTONES = 128;
+
+type PlaybackRevision = Pick<PublicPlaybackState, 'generation' | 'sequence'>;
+
+function comparePlaybackRevision(left: PlaybackRevision, right: PlaybackRevision): number {
+  return left.generation - right.generation || left.sequence - right.sequence;
+}
+
 export function createRequestId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
   return `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -44,16 +62,32 @@ function parseResponse(value: unknown): BridgeResponse | undefined {
 export class NativeBridge implements CatalogBridge {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly invalidationListeners = new Set<() => void>();
+  private readonly playbackStates = new Map<string, PublicPlaybackState>();
+  private readonly playbackStateTombstones = new Map<string, PublicPlaybackStateRemoval>();
+  private readonly playbackStateListeners = new Set<(states: PublicPlaybackState[]) => void>();
 
   constructor(private readonly native: IinaWebviewBridge) {
     native.onMessage('bridge.response', (message) => this.handleResponse(message));
     native.onMessage('catalog.invalidated', () => this.notifyInvalidated());
     native.onMessage('catalog.visible', () => this.notifyInvalidated());
+    native.onMessage(PLAYBACK_STATE_MESSAGE, (message) => this.handlePlaybackState(message));
+    native.onMessage(PLAYBACK_STATE_REMOVED_MESSAGE, (message) =>
+      this.handlePlaybackStateRemoved(message),
+    );
   }
 
   subscribeInvalidation(listener: () => void): () => void {
     this.invalidationListeners.add(listener);
     return () => this.invalidationListeners.delete(listener);
+  }
+
+  getPlaybackStates(): PublicPlaybackState[] {
+    return [...this.playbackStates.values()];
+  }
+
+  subscribePlaybackStates(listener: (states: PublicPlaybackState[]) => void): () => void {
+    this.playbackStateListeners.add(listener);
+    return () => this.playbackStateListeners.delete(listener);
   }
 
   request<K extends BridgeOperation>(
@@ -101,6 +135,67 @@ export class NativeBridge implements CatalogBridge {
   private notifyInvalidated(): void {
     for (const listener of this.invalidationListeners) listener();
   }
+
+  private handlePlaybackState(message: unknown): void {
+    const state = parsePublicPlaybackState(message);
+    if (state === undefined || !this.isNewerPlaybackState(state)) return;
+    this.playbackStateTombstones.delete(state.playbackId);
+    this.playbackStates.set(state.playbackId, state);
+    this.enforcePlaybackStateLimit();
+    this.notifyPlaybackStateListeners();
+  }
+
+  private handlePlaybackStateRemoved(message: unknown): void {
+    const removal = parsePublicPlaybackStateRemoval(message);
+    if (removal === undefined) return;
+    const current = this.playbackStates.get(removal.playbackId);
+    if (current !== undefined && comparePlaybackRevision(removal, current) < 0) return;
+    const tombstone = this.playbackStateTombstones.get(removal.playbackId);
+    if (tombstone !== undefined && comparePlaybackRevision(removal, tombstone) <= 0) return;
+    this.rememberPlaybackStateTombstone(removal);
+    if (current !== undefined && this.playbackStates.delete(removal.playbackId)) {
+      this.notifyPlaybackStateListeners();
+    }
+  }
+
+  private notifyPlaybackStateListeners(): void {
+    const states = this.getPlaybackStates();
+    for (const listener of this.playbackStateListeners) listener(states);
+  }
+
+  private isNewerPlaybackState(next: PublicPlaybackState): boolean {
+    const tombstone = this.playbackStateTombstones.get(next.playbackId);
+    if (tombstone !== undefined && comparePlaybackRevision(next, tombstone) <= 0) return false;
+    const current = this.playbackStates.get(next.playbackId);
+    if (current === undefined) return true;
+    return comparePlaybackRevision(next, current) > 0;
+  }
+
+  private enforcePlaybackStateLimit(): void {
+    if (this.playbackStates.size <= MAX_CACHED_PLAYBACK_STATES) return;
+    const oldest = [...this.playbackStates.values()].sort(
+      (left, right) => left.startedAtMs - right.startedAtMs || left.updatedAtMs - right.updatedAtMs,
+    )[0];
+    if (oldest === undefined) return;
+    this.playbackStates.delete(oldest.playbackId);
+    this.rememberPlaybackStateTombstone({
+      version: 1,
+      playbackId: oldest.playbackId,
+      generation: oldest.generation,
+      sequence: oldest.sequence,
+      removedAtMs: Date.now(),
+    });
+  }
+
+  private rememberPlaybackStateTombstone(removal: PublicPlaybackStateRemoval): void {
+    this.playbackStateTombstones.delete(removal.playbackId);
+    this.playbackStateTombstones.set(removal.playbackId, removal);
+    while (this.playbackStateTombstones.size > MAX_PLAYBACK_STATE_TOMBSTONES) {
+      const oldest = this.playbackStateTombstones.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.playbackStateTombstones.delete(oldest);
+    }
+  }
 }
 
 const demoConnection: PublicConnection = {
@@ -115,6 +210,9 @@ const demoConnection: PublicConnection = {
 
 export class MockBridge implements CatalogBridge {
   readonly requests: BridgeRequest[] = [];
+  private readonly playbackStates = new Map<string, PublicPlaybackState>();
+  private readonly playbackStateListeners = new Set<(states: PublicPlaybackState[]) => void>();
+  private playbackSequence = 0;
 
   constructor(
     private connected = true,
@@ -122,6 +220,25 @@ export class MockBridge implements CatalogBridge {
       [K in BridgeOperation]: BridgeResultMap[K] | Error;
     }> = {},
   ) {}
+
+  getPlaybackStates(): PublicPlaybackState[] {
+    return [...this.playbackStates.values()];
+  }
+
+  subscribePlaybackStates(listener: (states: PublicPlaybackState[]) => void): () => void {
+    this.playbackStateListeners.add(listener);
+    return () => this.playbackStateListeners.delete(listener);
+  }
+
+  emitPlaybackState(state: PublicPlaybackState | undefined): void {
+    if (state === undefined) {
+      this.playbackStates.clear();
+    } else {
+      this.playbackStates.set(state.playbackId, state);
+    }
+    const states = this.getPlaybackStates();
+    for (const listener of this.playbackStateListeners) listener(states);
+  }
 
   async request<K extends BridgeOperation>(
     operation: K,
@@ -178,6 +295,7 @@ export class MockBridge implements CatalogBridge {
           request.videoTranscodeConfirmationId === 'demo-transcode-confirmation';
         return {
           status: approved ? 'started' : 'confirmation-required',
+          ...(approved ? { playbackId: `demo-playback-${++this.playbackSequence}` } : {}),
           ...(!approved ? { confirmationId: 'demo-transcode-confirmation' } : {}),
           plan: {
             playMethod: approved ? 'DirectPlay' : 'Transcode',

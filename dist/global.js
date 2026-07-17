@@ -6141,6 +6141,7 @@
     "playback.start": external_exports.discriminatedUnion("status", [
       external_exports.object({
         status: external_exports.literal("started"),
+        playbackId: identifier3,
         plan: PublicPlaybackPlanSchema
       }).strict(),
       external_exports.object({
@@ -6319,6 +6320,54 @@
       }
     }
     return PlaybackPlanSchema.parse(plan);
+  }
+
+  // packages/core/src/playback-state.ts
+  var PLAYBACK_STATE_MESSAGE = "playback.state";
+  var PLAYBACK_STATE_REMOVED_MESSAGE = "playback.state.removed";
+  var MAX_PUBLIC_PLAYBACK_STATE_CHARS = 8192;
+  var safeTicks2 = external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+  var safeIndex = external_exports.number().int().nonnegative().max(1e6);
+  var safeText = external_exports.string().trim().min(1).max(512);
+  var PublicPlaybackStateSchema = external_exports.object({
+    version: external_exports.literal(1),
+    playbackId: external_exports.string().trim().min(1).max(128),
+    sequence: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    generation: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    status: external_exports.enum(["preparing", "playing", "paused", "stopped", "error"]),
+    itemId: external_exports.string().trim().min(1).max(512),
+    positionTicks: safeTicks2,
+    durationTicks: safeTicks2.optional(),
+    playbackRate: external_exports.number().finite().min(0.01).max(100).optional(),
+    isBuffering: external_exports.boolean().optional(),
+    title: safeText,
+    seriesName: safeText.optional(),
+    seasonNumber: safeIndex.optional(),
+    episodeNumber: safeIndex.optional(),
+    playMethod: PlayMethodSchema,
+    stopReason: external_exports.enum(["completed", "closed", "replaced", "failed", "user"]).optional(),
+    startedAtMs: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    updatedAtMs: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+  }).strict();
+  var PublicPlaybackStateRemovalSchema = external_exports.object({
+    version: external_exports.literal(1),
+    playbackId: external_exports.string().trim().min(1).max(128),
+    generation: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    sequence: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    removedAtMs: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+  }).strict();
+  function parsePublicPlaybackState(value) {
+    let candidate = value;
+    if (typeof value === "string") {
+      if (value.length === 0 || value.length > MAX_PUBLIC_PLAYBACK_STATE_CHARS) return void 0;
+      try {
+        candidate = JSON.parse(value);
+      } catch {
+        return void 0;
+      }
+    }
+    const parsed = PublicPlaybackStateSchema.safeParse(candidate);
+    return parsed.success ? parsed.data : void 0;
   }
 
   // packages/core/src/preference-contracts.ts
@@ -7408,6 +7457,47 @@
     }
   };
 
+  // packages/plugin/src/playback-state-mailbox.ts
+  var PLAYBACK_STATE_FILE_PREFIX = "jellyfin-playback-state-";
+  var PLAYBACK_STATE_FILE_SUFFIX = ".json";
+  var SAFE_PLAYBACK_ID = /^[A-Za-z0-9-]{1,128}$/;
+  function playbackStatePath(playbackId) {
+    if (!SAFE_PLAYBACK_ID.test(playbackId)) throw new Error("Invalid public playback identifier.");
+    return `@tmp/${PLAYBACK_STATE_FILE_PREFIX}${playbackId}${PLAYBACK_STATE_FILE_SUFFIX}`;
+  }
+  function readPlaybackStates(file, allowedPlaybackIds, maximumFiles = 64) {
+    if (!Number.isSafeInteger(maximumFiles) || maximumFiles < 1) return [];
+    const states = [];
+    for (const playbackId of allowedPlaybackIds) {
+      if (states.length >= maximumFiles) break;
+      try {
+        const raw = file.read(playbackStatePath(playbackId));
+        if (raw === void 0 || raw.length > MAX_PUBLIC_PLAYBACK_STATE_CHARS) continue;
+        const state = parsePublicPlaybackState(raw);
+        if (state?.playbackId === playbackId) states.push(state);
+      } catch {
+      }
+    }
+    return states;
+  }
+  function prunePlaybackStateFiles(file, retainedPlaybackIds = /* @__PURE__ */ new Set()) {
+    const pattern = new RegExp(
+      `^${PLAYBACK_STATE_FILE_PREFIX}([A-Za-z0-9-]{1,128})\\${PLAYBACK_STATE_FILE_SUFFIX}$`
+    );
+    try {
+      for (const entry of file.list("@tmp/", { includeSubDir: false })) {
+        if (entry.isDir) continue;
+        const playbackId = pattern.exec(entry.filename)?.[1];
+        if (playbackId === void 0 || retainedPlaybackIds.has(playbackId)) continue;
+        try {
+          file.delete(playbackStatePath(playbackId));
+        } catch {
+        }
+      }
+    } catch {
+    }
+  }
+
   // packages/plugin/src/safe-logger.ts
   var MAX_SERIALIZED_CONTEXT_CHARS = 16 * 1024;
   var MAX_LOG_MESSAGE_CHARS = 4 * 1024;
@@ -7516,6 +7606,13 @@
   var PENDING_LAUNCH_TTL_MS = 3e4;
   var MAX_CATALOG_DIAGNOSTICS_PER_ENTRY = 32;
   var SESSION_REVOCATION_GRACE_MS = 2500;
+  var ACTIVE_PLAYBACK_STATE_TIMEOUT_MS = 35e3;
+  var TERMINAL_PLAYBACK_STATE_RETENTION_MS = 3e4;
+  var UNOBSERVED_PLAYBACK_RETENTION_MS = 5 * 6e4;
+  var AUTH_BOUNDARY_FINAL_CLEANUP_MS = 6e4;
+  var MAX_TRACKED_PLAYBACKS = 64;
+  var launchedPlaybackIds = /* @__PURE__ */ new Map();
+  var publishedPlaybackStates = /* @__PURE__ */ new Map();
   function staleRequest() {
     const error = new Error("The connection changed before this request completed.");
     error.code = "STALE_CONNECTION";
@@ -7576,12 +7673,58 @@
     }
     playbackConfirmations.clear();
   }
+  function deletePlaybackStateFile(playbackId) {
+    try {
+      api.file.delete(playbackStatePath(playbackId));
+    } catch {
+    }
+  }
+  function postPlaybackStateRemoval(playbackId, previous) {
+    const removal = {
+      version: 1,
+      playbackId,
+      generation: previous.generation,
+      sequence: previous.sequence,
+      removedAtMs: Date.now()
+    };
+    api.standaloneWindow.postMessage(PLAYBACK_STATE_REMOVED_MESSAGE, removal);
+  }
+  function forgetPlayback(playbackId) {
+    const previous = publishedPlaybackStates.get(playbackId);
+    if (previous !== void 0) postPlaybackStateRemoval(playbackId, previous);
+    publishedPlaybackStates.delete(playbackId);
+    launchedPlaybackIds.delete(playbackId);
+    deletePlaybackStateFile(playbackId);
+  }
+  function suspendPlaybackState(playbackId, now) {
+    const previous = publishedPlaybackStates.get(playbackId);
+    if (previous !== void 0) postPlaybackStateRemoval(playbackId, previous);
+    publishedPlaybackStates.delete(playbackId);
+    launchedPlaybackIds.set(playbackId, now);
+    deletePlaybackStateFile(playbackId);
+  }
+  function resetPlaybackStateBoundary() {
+    const playbackIds = /* @__PURE__ */ new Set([...launchedPlaybackIds.keys(), ...publishedPlaybackStates.keys()]);
+    for (const [playbackId, previous] of publishedPlaybackStates) {
+      postPlaybackStateRemoval(playbackId, previous);
+    }
+    publishedPlaybackStates.clear();
+    launchedPlaybackIds.clear();
+    prunePlaybackStateFiles(api.file);
+    const deleteBoundaryFiles = () => {
+      for (const playbackId of playbackIds) deletePlaybackStateFile(playbackId);
+      prunePlaybackStateFiles(api.file, new Set(launchedPlaybackIds.keys()));
+    };
+    setTimeout(deleteBoundaryFiles, SESSION_REVOCATION_GRACE_MS + 100);
+    setTimeout(deleteBoundaryFiles, AUTH_BOUNDARY_FINAL_CLEANUP_MS);
+  }
   function beginAuthenticationAttempt() {
     connectionGeneration += 1;
     quickConnectAttempt = void 0;
     quickConnectGeneration = connectionGeneration;
     pendingLaunches.clear();
     playbackConfirmations.clear();
+    resetPlaybackStateBoundary();
     stopTrackedPlayers("closed");
     return connectionGeneration;
   }
@@ -7688,6 +7831,62 @@
     };
     api.standaloneWindow.postMessage(BRIDGE_RESPONSE_MESSAGE, response);
   }
+  function rememberLaunchedPlayback(playbackId) {
+    launchedPlaybackIds.set(playbackId, Date.now());
+    if (launchedPlaybackIds.size <= MAX_TRACKED_PLAYBACKS) return;
+    const oldest = [...launchedPlaybackIds.entries()].sort((left, right) => left[1] - right[1])[0];
+    if (oldest === void 0) return;
+    forgetPlayback(oldest[0]);
+  }
+  function postPlaybackStates(force = false) {
+    const now = Date.now();
+    const allowed = new Set(launchedPlaybackIds.keys());
+    const states = readPlaybackStates(api.file, allowed, MAX_TRACKED_PLAYBACKS);
+    const observedPlaybackIds = new Set(states.map(({ playbackId }) => playbackId));
+    for (const state of states) {
+      const active = state.status === "preparing" || state.status === "playing" || state.status === "paused";
+      const previous = publishedPlaybackStates.get(state.playbackId);
+      if (active && now - state.updatedAtMs > ACTIVE_PLAYBACK_STATE_TIMEOUT_MS) {
+        suspendPlaybackState(state.playbackId, now);
+        continue;
+      }
+      if (!active && previous?.terminalPublishedAtMs !== void 0 && now - previous.terminalPublishedAtMs >= TERMINAL_PLAYBACK_STATE_RETENTION_MS) {
+        forgetPlayback(state.playbackId);
+        continue;
+      }
+      const newer = previous === void 0 || state.generation > previous.generation || state.generation === previous.generation && state.sequence > previous.sequence;
+      if (!force && !newer) continue;
+      const firstTerminal = !active && previous?.terminalPublishedAtMs === void 0;
+      publishedPlaybackStates.set(state.playbackId, {
+        generation: state.generation,
+        sequence: state.sequence,
+        status: state.status,
+        updatedAtMs: state.updatedAtMs,
+        ...!active ? { terminalPublishedAtMs: previous?.terminalPublishedAtMs ?? now } : {}
+      });
+      api.standaloneWindow.postMessage(PLAYBACK_STATE_MESSAGE, state);
+      if (firstTerminal) {
+        const terminalConnectionGeneration = connectionGeneration;
+        setTimeout(() => {
+          if (terminalConnectionGeneration !== connectionGeneration) return;
+          api.standaloneWindow.postMessage("catalog.invalidated", { reason: "playback" });
+        }, 1e3);
+      }
+    }
+    for (const [playbackId, launchedAtMs] of launchedPlaybackIds) {
+      if (observedPlaybackIds.has(playbackId) || publishedPlaybackStates.has(playbackId) || now - launchedAtMs <= UNOBSERVED_PLAYBACK_RETENTION_MS) {
+        continue;
+      }
+      forgetPlayback(playbackId);
+    }
+    for (const [playbackId, previous] of publishedPlaybackStates) {
+      const active = previous.status === "preparing" || previous.status === "playing" || previous.status === "paused";
+      const staleActive = active && now - previous.updatedAtMs > ACTIVE_PLAYBACK_STATE_TIMEOUT_MS;
+      const expiredTerminal = !active && previous.terminalPublishedAtMs !== void 0 && now - previous.terminalPublishedAtMs >= TERMINAL_PLAYBACK_STATE_RETENTION_MS;
+      if (staleActive) suspendPlaybackState(playbackId, now);
+      else if (expiredTerminal) forgetPlayback(playbackId);
+    }
+  }
   async function prepareLaunch(request) {
     const generation = connectionGeneration;
     const context = authenticatedContext();
@@ -7719,7 +7918,8 @@
         assertManagedPlaybackSequence(managedSequence);
         api.global.postMessage(playerId2, PLAYER_MESSAGES.launch, launch);
       });
-      return { status: "started", plan: publicPlan };
+      rememberLaunchedPlayback(launch.nonce);
+      return { status: "started", playbackId: launch.nonce, plan: publicPlan };
     }
     const nonce = launch.nonce;
     prunePendingLaunches();
@@ -7764,12 +7964,13 @@
         api.global.postMessage(playerId, PLAYER_MESSAGES.launch, pending.launch);
         if (!request.openInNewWindow) managedPlayerId = playerId;
       });
+      rememberLaunchedPlayback(launch.nonce);
       pendingLaunches.delete(nonce);
     } catch (error) {
       pendingLaunches.delete(nonce);
       throw error;
     }
-    return { status: "started", plan: publicPlan };
+    return { status: "started", playbackId: launch.nonce, plan: publicPlan };
   }
   async function launchPlayback(request) {
     if (request.videoTranscodeConfirmationId !== void 0) {
@@ -7906,6 +8107,7 @@
           quickConnectGeneration = connectionGeneration;
           pendingLaunches.clear();
           playbackConfirmations.clear();
+          resetPlaybackStateBoundary();
           stopTrackedPlayers("closed");
           if (context !== void 0) {
             setTimeout(() => {
@@ -7962,6 +8164,7 @@
       api.standaloneWindow.postMessage("catalog.visible", {
         connection: publicConnection2(connectionStore.readMetadata())
       });
+      postPlaybackStates(true);
     }, 50);
   }
   function openCatalog() {
@@ -7969,12 +8172,14 @@
     api.standaloneWindow.open();
     if (catalogReady) postCatalogVisible();
   }
-  function markCatalogReady() {
-    if (catalogReady) return;
+  function markCatalogReady(replay) {
+    const firstReady = !catalogReady;
     catalogReady = true;
     if (!catalogOpenRequested) return;
-    api.standaloneWindow.open();
-    postCatalogVisible();
+    if (firstReady) {
+      api.standaloneWindow.open();
+    }
+    if (firstReady || replay) postCatalogVisible();
   }
   api.standaloneWindow.loadFile("dist/ui/catalog/index.html");
   api.standaloneWindow.setProperty({
@@ -7985,10 +8190,10 @@
   });
   api.standaloneWindow.setFrame(1200, 820, null, null);
   api.standaloneWindow.onMessage(BRIDGE_REQUEST_MESSAGE, (data) => {
-    markCatalogReady();
+    markCatalogReady(false);
     void handleBridgeRequest(data);
   });
-  api.standaloneWindow.onMessage(CATALOG_READY_MESSAGE, () => markCatalogReady());
+  api.standaloneWindow.onMessage(CATALOG_READY_MESSAGE, () => markCatalogReady(true));
   api.standaloneWindow.onMessage(CATALOG_DIAGNOSTIC_MESSAGE, (data) => {
     const record = parseCatalogDiagnosticRecord(data);
     if (record === void 0) return;
@@ -8007,10 +8212,12 @@ ${record.stack ?? ""}`;
     try {
       if (consumeCatalogOpenRequest(api.preferences)) openCatalog();
       if (consumeDiagnosticLogRevealRequest(api.preferences)) diagnosticLog.reveal();
+      postPlaybackStates();
     } catch (error) {
-      logger.warn("Could not handle a request from plugin preferences", error);
+      logger.warn("Could not process global Jellyfin housekeeping", error);
     }
   }, 500);
   logger.info("Global Jellyfin integration ready");
+  prunePlaybackStateFiles(api.file);
 })();
 //# sourceMappingURL=global.js.map

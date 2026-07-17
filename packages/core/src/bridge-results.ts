@@ -74,6 +74,7 @@ const resultSchemas = {
     z
       .object({
         status: z.literal('started'),
+        playbackId: identifier,
         plan: PublicPlaybackPlanSchema,
       })
       .strict(),

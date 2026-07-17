@@ -6,6 +6,7 @@ import type {
   BridgeOperation,
   BridgePayload,
   BridgeResultMap,
+  PublicPlaybackState,
   ShowDetails,
 } from '../src/bridge/contracts';
 import {
@@ -961,6 +962,25 @@ describe('catalog journey', () => {
     await user.click(within(modal).getByRole('button', { name: 'Convert and Play' }));
     expect(await screen.findByText('Starting converted playback in IINA…')).toBeInTheDocument();
 
+    act(() =>
+      bridge.emitPlaybackState({
+        version: 1,
+        playbackId: 'demo-playback-1',
+        sequence: 1,
+        generation: 1,
+        status: 'playing',
+        itemId: demoShowDetails.id,
+        positionTicks: 14_520_000_000,
+        durationTicks: 26_400_000_000,
+        title: 'Crossing Lines',
+        playMethod: 'Transcode',
+        startedAtMs: Date.now(),
+        updatedAtMs: Date.now(),
+        playbackRate: 1,
+        isBuffering: false,
+      }),
+    );
+
     const initialStart = bridge.requests.find((request) => request.operation === 'playback.start');
     expect(initialStart?.payload).toMatchObject({
       mediaSourceId: 'source-4k',
@@ -984,6 +1004,334 @@ describe('catalog journey', () => {
           request.operation === 'playback.start' && request.payload.openInNewWindow === true,
       ),
     ).toBe(true);
+  });
+
+  it('keeps details status, actions, and progress synchronized with native playback', async () => {
+    const bridge = new MockBridge();
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
+    const baseState: PublicPlaybackState = {
+      version: 1,
+      playbackId: 'play-live-status',
+      sequence: 1,
+      generation: 1,
+      status: 'playing',
+      itemId: demoShowDetails.id,
+      positionTicks: 6_600_000_000,
+      durationTicks: 26_400_000_000,
+      title: 'Crossing Lines',
+      seriesName: 'HORIZONS',
+      seasonNumber: 1,
+      episodeNumber: 3,
+      playMethod: 'DirectPlay',
+      startedAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+    };
+
+    act(() => bridge.emitPlaybackState(baseState));
+    expect(screen.getByText(/Playing in IINA · 11:00 of 44:00/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Playing Episode/ })).toBeDisabled();
+    expect(screen.getAllByRole('progressbar', { name: '25 percent watched' })).toHaveLength(2);
+
+    act(() =>
+      bridge.emitPlaybackState({
+        ...baseState,
+        sequence: 2,
+        status: 'paused',
+        positionTicks: 7_200_000_000,
+        updatedAtMs: Date.now(),
+      }),
+    );
+    expect(screen.getByText('Paused in IINA · 12:00 of 44:00')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Paused Episode/ })).toBeDisabled();
+
+    act(() =>
+      bridge.emitPlaybackState({
+        ...baseState,
+        sequence: 3,
+        status: 'stopped',
+        positionTicks: 26_400_000_000,
+        stopReason: 'completed',
+        updatedAtMs: Date.now(),
+      }),
+    );
+    expect(screen.getByText('Finished playing in IINA.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Play Episode' })).toBeEnabled();
+    expect(screen.getAllByRole('progressbar', { name: '100 percent watched' })).toHaveLength(2);
+  });
+
+  it('uses the live stopped position for resume', async () => {
+    const bridge = new MockBridge();
+    const user = userEvent.setup();
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
+    const state: PublicPlaybackState = {
+      version: 1,
+      playbackId: 'play-live-resume',
+      sequence: 1,
+      generation: 1,
+      status: 'stopped',
+      stopReason: 'user',
+      itemId: demoShowDetails.id,
+      positionTicks: 7_200_000_000,
+      durationTicks: 26_400_000_000,
+      title: 'Crossing Lines',
+      playMethod: 'DirectPlay',
+      startedAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+    };
+
+    act(() => bridge.emitPlaybackState(state));
+    await user.click(screen.getByRole('button', { name: /Resume Episode/ }));
+    expect(
+      bridge.requests.filter((request) => request.operation === 'playback.start').at(-1)?.payload,
+    ).toMatchObject({ startPositionTicks: 7_200_000_000, openInNewWindow: false });
+  });
+
+  it('uses the last exact native position, not UI extrapolation, for a new window', async () => {
+    const bridge = new MockBridge();
+    const user = userEvent.setup();
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
+    const now = Date.now();
+
+    act(() =>
+      bridge.emitPlaybackState({
+        playbackId: 'play-live-playing',
+        version: 1,
+        sequence: 1,
+        generation: 1,
+        status: 'playing',
+        itemId: demoShowDetails.id,
+        positionTicks: 8_400_000_000,
+        durationTicks: 26_400_000_000,
+        title: 'Crossing Lines',
+        playMethod: 'DirectPlay',
+        startedAtMs: now - 10_000,
+        updatedAtMs: now - 5_000,
+        playbackRate: 2,
+        isBuffering: false,
+      }),
+    );
+    expect(screen.getByText(/Playing in IINA · 14:10 of 44:00/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Open in New Window' }));
+    expect(
+      bridge.requests.filter((request) => request.operation === 'playback.start').at(-1)?.payload,
+    ).toMatchObject({ startPositionTicks: 8_400_000_000, openInNewWindow: true });
+  });
+
+  it('turns an acknowledged but stuck preparing session into a retryable warning', () => {
+    const bridge = new MockBridge();
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
+    const now = Date.now();
+
+    act(() =>
+      bridge.emitPlaybackState({
+        version: 1,
+        playbackId: 'play-stuck-preparing',
+        sequence: 7,
+        generation: 1,
+        status: 'preparing',
+        itemId: demoShowDetails.id,
+        positionTicks: 0,
+        durationTicks: 26_400_000_000,
+        title: 'Crossing Lines',
+        playMethod: 'DirectPlay',
+        startedAtMs: now - 60_001,
+        updatedAtMs: now,
+      }),
+    );
+
+    expect(
+      screen.getByText('IINA is taking longer than expected to start playback. You can try again.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry Episode' })).toBeEnabled();
+  });
+
+  it('prefers an active same-item window over a newer or requested stopped window', async () => {
+    const bridge = new MockBridge();
+    const user = userEvent.setup();
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /Resume Episode/ }));
+    const now = Date.now();
+    const common = {
+      version: 1 as const,
+      generation: 1,
+      itemId: demoShowDetails.id,
+      durationTicks: 26_400_000_000,
+      title: 'Crossing Lines',
+      playMethod: 'DirectPlay' as const,
+      updatedAtMs: now,
+    };
+    act(() => {
+      bridge.emitPlaybackState({
+        ...common,
+        playbackId: 'demo-playback-1',
+        sequence: 2,
+        status: 'stopped',
+        stopReason: 'user',
+        positionTicks: 7_200_000_000,
+        startedAtMs: now + 1_000,
+      });
+      bridge.emitPlaybackState({
+        ...common,
+        playbackId: 'still-playing',
+        sequence: 1,
+        status: 'playing',
+        positionTicks: 8_400_000_000,
+        startedAtMs: now,
+      });
+    });
+
+    expect(screen.getByText(/Playing in IINA · 14:00 of 44:00/)).toBeInTheDocument();
+    expect(screen.queryByText(/Playback stopped in IINA/)).toBeNull();
+  });
+
+  it('turns an unacknowledged native launch into a recoverable error instead of waiting forever', async () => {
+    vi.useFakeTimers();
+    const bridge = new MockBridge();
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
+    const now = Date.now();
+    act(() =>
+      bridge.emitPlaybackState({
+        version: 1,
+        playbackId: 'older-same-item',
+        sequence: 1,
+        generation: 1,
+        status: 'paused',
+        itemId: demoShowDetails.id,
+        positionTicks: 2_000_000_000,
+        durationTicks: 26_400_000_000,
+        title: 'Crossing Lines',
+        playMethod: 'DirectPlay',
+        startedAtMs: now - 30_000,
+        updatedAtMs: now,
+      }),
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open in New Window' }));
+      await Promise.resolve();
+    });
+    expect(screen.getByText('Opening in a new IINA window…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Starting Episode' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Open in New Window' })).toBeDisabled();
+
+    act(() => vi.advanceTimersByTime(20_000));
+
+    expect(
+      screen.getByText(
+        'IINA did not report that playback started. Check the player window and try again.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Opening in a new IINA window…')).toBeNull();
+  });
+
+  it('does not apply another item’s playback state to the selected details', () => {
+    const bridge = new MockBridge();
+    render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
+
+    act(() =>
+      bridge.emitPlaybackState({
+        version: 1,
+        playbackId: 'play-other-item',
+        sequence: 1,
+        generation: 1,
+        status: 'playing',
+        itemId: 'unrelated-episode',
+        positionTicks: 100,
+        durationTicks: 1_000,
+        title: 'Another Episode',
+        playMethod: 'DirectPlay',
+        startedAtMs: Date.now(),
+        updatedAtMs: Date.now(),
+      }),
+    );
+
+    expect(screen.queryByText(/Playing in IINA/)).toBeNull();
+    expect(screen.getByRole('button', { name: /Resume Episode/ })).toBeEnabled();
+  });
+
+  it('reconciles refreshed Jellyfin progress without remounting the details route', async () => {
+    const bridge = new MockBridge();
+    const view = render(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={demoShowDetails}
+      />,
+    );
+    const refreshed = {
+      ...demoShowDetails,
+      progress: 0.75,
+      playbackPositionTicks: 19_800_000_000,
+      progressLabel: '11 min remaining',
+      episodes: demoShowDetails.episodes.map((episode) =>
+        episode.id === demoShowDetails.id
+          ? { ...episode, progress: 0.75, playbackPositionTicks: 19_800_000_000 }
+          : episode,
+      ),
+    };
+
+    view.rerender(
+      <CatalogApp
+        bridge={bridge}
+        initialConnected
+        initialRoute="details"
+        showOverride={refreshed}
+      />,
+    );
+
+    expect(await screen.findAllByRole('progressbar', { name: '75 percent watched' })).toHaveLength(
+      2,
+    );
   });
 
   it('keeps a multi-row episode grid in document flow after the details content', () => {
@@ -1386,6 +1734,97 @@ describe('native catalog events', () => {
     });
 
     await expect(pending).rejects.toThrow('invalid Jellyfin response');
+  });
+
+  it('validates, caches, orders, and removes public playback snapshots', () => {
+    const handlers = new Map<string, (message: unknown) => void>();
+    const bridge = new NativeBridge({
+      postMessage: vi.fn(),
+      onMessage: (name, handler) => handlers.set(name, handler),
+    });
+    const listener = vi.fn();
+    bridge.subscribePlaybackStates(listener);
+    const state: PublicPlaybackState = {
+      version: 1,
+      playbackId: 'play-native',
+      sequence: 2,
+      generation: 1,
+      status: 'playing',
+      itemId: 'episode-native',
+      positionTicks: 100,
+      durationTicks: 1_000,
+      title: 'Native Episode',
+      playMethod: 'DirectPlay',
+      startedAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+    };
+
+    handlers.get('playback.state')?.(state);
+    handlers.get('playback.state')?.({ ...state, sequence: 1, positionTicks: 50 });
+    handlers.get('playback.state')?.({ ...state, sequence: 3, accessToken: 'must-not-cross' });
+
+    expect(bridge.getPlaybackStates()).toEqual([state]);
+    expect(listener).toHaveBeenCalledOnce();
+
+    handlers.get('playback.state.removed')?.({ playbackId: state.playbackId });
+    expect(bridge.getPlaybackStates()).toEqual([state]);
+
+    const removal = {
+      version: 1,
+      playbackId: state.playbackId,
+      generation: state.generation,
+      sequence: state.sequence,
+      removedAtMs: Date.now(),
+    };
+    handlers.get('playback.state.removed')?.(removal);
+    expect(bridge.getPlaybackStates()).toEqual([]);
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    handlers.get('playback.state')?.(state);
+    expect(bridge.getPlaybackStates()).toEqual([]);
+    handlers.get('playback.state')?.({ ...state, sequence: 3, positionTicks: 200 });
+    expect(bridge.getPlaybackStates()).toEqual([{ ...state, sequence: 3, positionTicks: 200 }]);
+  });
+
+  it('bounds native playback state and tombstones evicted revisions', () => {
+    const handlers = new Map<string, (message: unknown) => void>();
+    const bridge = new NativeBridge({
+      postMessage: vi.fn(),
+      onMessage: (name, handler) => handlers.set(name, handler),
+    });
+    const base: PublicPlaybackState = {
+      version: 1,
+      playbackId: 'play-0',
+      sequence: 1,
+      generation: 1,
+      status: 'playing',
+      itemId: 'episode-0',
+      positionTicks: 100,
+      durationTicks: 1_000,
+      title: 'Episode',
+      playMethod: 'DirectPlay',
+      startedAtMs: 1_000,
+      updatedAtMs: 1_000,
+    };
+    for (let index = 0; index < 65; index += 1) {
+      handlers.get('playback.state')?.({
+        ...base,
+        playbackId: `play-${index}`,
+        itemId: `episode-${index}`,
+        startedAtMs: 1_000 + index,
+        updatedAtMs: 1_000 + index,
+      });
+    }
+
+    expect(bridge.getPlaybackStates()).toHaveLength(64);
+    expect(bridge.getPlaybackStates().some(({ playbackId }) => playbackId === 'play-0')).toBe(
+      false,
+    );
+
+    handlers.get('playback.state')?.(base);
+    expect(bridge.getPlaybackStates().some(({ playbackId }) => playbackId === 'play-0')).toBe(
+      false,
+    );
   });
 });
 

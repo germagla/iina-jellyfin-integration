@@ -120,6 +120,25 @@ describe('bridge contracts', () => {
     ).toMatchObject({ confirmationId: 'confirmation-1' });
   });
 
+  it('requires a public playback identifier when native playback starts', () => {
+    const plan = {
+      playMethod: 'DirectPlay',
+      conversion: 'none',
+      requiresVideoTranscodeConfirmation: false,
+      transcodeReasons: [],
+      mediaSourceId: 'source-1',
+    };
+
+    expect(() => parseBridgeResult('playback.start', { status: 'started', plan })).toThrow();
+    expect(
+      parseBridgeResult('playback.start', {
+        status: 'started',
+        playbackId: 'playback-1',
+        plan,
+      }),
+    ).toMatchObject({ playbackId: 'playback-1' });
+  });
+
   it('strips hostile Jellyfin fields from catalog results before they cross the webview bridge', () => {
     const backdropTags = Array.from({ length: 12 }, (_, index) => `backdrop-${index + 1}`);
     const result = parseBridgeResult('catalog.query', {
