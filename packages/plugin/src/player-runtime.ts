@@ -256,6 +256,7 @@ export class PlayerRuntime {
     });
 
     this.api.event.on('iina.window-loaded', () => this.loadPlayerViews());
+    this.api.event.on('iina.plugin-overlay-loaded', () => this.overlayLoaded());
     this.api.event.on('iina.file-loaded', () => void this.mediaLoaded());
     this.api.event.on('mpv.pause.changed', () => void this.pauseChanged());
     this.api.event.on('mpv.speed.changed', () => this.playbackTimingChanged());
@@ -276,9 +277,6 @@ export class PlayerRuntime {
       this.invalidatePendingLoads();
       this.enqueueControl(() => this.stop('closed', true));
     });
-
-    this.api.sidebar.onMessage('host.action', (data) => this.handleViewAction(data, 'sidebar'));
-    this.api.overlay.onMessage('host.action', (data) => this.handleViewAction(data, 'overlay'));
 
     this.ensureProgressTimer();
   }
@@ -1421,14 +1419,30 @@ export class PlayerRuntime {
 
   private loadPlayerViews(): void {
     this.api.sidebar.loadFile('dist/ui/sidebar/index.html');
+    // IINA clears the sidebar message hub in loadFile(), so register actions
+    // only after initiating the new page load.
+    this.api.sidebar.onMessage('host.action', (data) => this.handleViewAction(data, 'sidebar'));
     this.sidebarReady = true;
+    this.overlayReady = false;
     this.api.overlay.loadFile('dist/ui/overlay/index.html');
+    this.publishState();
+    this.publishChapterSkipSettings();
+    this.publishChapterSkip();
+    this.publishUpNext();
+  }
+
+  private overlayLoaded(): void {
+    // overlay.onMessage() is ignored until IINA marks the webview loaded, and
+    // overlay.loadFile() clears prior listeners. The loaded event is therefore
+    // the first reliable point to install the action bridge.
+    this.api.overlay.onMessage('host.action', (data) => this.handleViewAction(data, 'overlay'));
     this.api.overlay.setClickable(true);
     this.overlayReady = true;
     this.publishState();
     this.publishChapterSkipSettings();
     this.publishChapterSkip();
     this.publishUpNext();
+    if (this.chapterSkip !== undefined || this.upNext !== undefined) this.api.overlay.show();
   }
 
   private handleViewAction(raw: unknown, source: 'sidebar' | 'overlay'): void {

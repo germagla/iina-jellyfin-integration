@@ -6564,6 +6564,7 @@
         await this.resolveLoad(next);
       });
       this.api.event.on("iina.window-loaded", () => this.loadPlayerViews());
+      this.api.event.on("iina.plugin-overlay-loaded", () => this.overlayLoaded());
       this.api.event.on("iina.file-loaded", () => void this.mediaLoaded());
       this.api.event.on("mpv.pause.changed", () => void this.pauseChanged());
       this.api.event.on("mpv.speed.changed", () => this.playbackTimingChanged());
@@ -6584,8 +6585,6 @@
         this.invalidatePendingLoads();
         this.enqueueControl(() => this.stop("closed", true));
       });
-      this.api.sidebar.onMessage("host.action", (data) => this.handleViewAction(data, "sidebar"));
-      this.api.overlay.onMessage("host.action", (data) => this.handleViewAction(data, "overlay"));
       this.ensureProgressTimer();
     }
     receiveLaunch(raw) {
@@ -7542,14 +7541,24 @@
     }
     loadPlayerViews() {
       this.api.sidebar.loadFile("dist/ui/sidebar/index.html");
+      this.api.sidebar.onMessage("host.action", (data) => this.handleViewAction(data, "sidebar"));
       this.sidebarReady = true;
+      this.overlayReady = false;
       this.api.overlay.loadFile("dist/ui/overlay/index.html");
+      this.publishState();
+      this.publishChapterSkipSettings();
+      this.publishChapterSkip();
+      this.publishUpNext();
+    }
+    overlayLoaded() {
+      this.api.overlay.onMessage("host.action", (data) => this.handleViewAction(data, "overlay"));
       this.api.overlay.setClickable(true);
       this.overlayReady = true;
       this.publishState();
       this.publishChapterSkipSettings();
       this.publishChapterSkip();
       this.publishUpNext();
+      if (this.chapterSkip !== void 0 || this.upNext !== void 0) this.api.overlay.show();
     }
     handleViewAction(raw, source) {
       if (raw === null || typeof raw !== "object") return;

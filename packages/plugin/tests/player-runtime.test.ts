@@ -157,13 +157,54 @@ function installedDurationHandler(api: ReturnType<typeof createRuntime>['api']):
 }
 
 function loadPlayerViews(api: ReturnType<typeof createRuntime>['api']): void {
-  const handler = api.event.on.mock.calls.find(
+  const windowLoaded = api.event.on.mock.calls.find(
     ([name]) => name === 'iina.window-loaded',
   )?.[1] as () => void;
-  handler();
+  windowLoaded();
+  const overlayLoaded = api.event.on.mock.calls.find(
+    ([name]) => name === 'iina.plugin-overlay-loaded',
+  )?.[1] as () => void;
+  overlayLoaded();
 }
 
 describe('chapter skipping', () => {
+  it('installs view action bridges after IINA clears each webview message hub', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      runtime.install();
+      const windowLoaded = api.event.on.mock.calls.find(
+        ([name]) => name === 'iina.window-loaded',
+      )?.[1] as () => void;
+      const overlayLoaded = api.event.on.mock.calls.find(
+        ([name]) => name === 'iina.plugin-overlay-loaded',
+      )?.[1] as () => void;
+
+      expect(api.sidebar.onMessage).not.toHaveBeenCalled();
+      expect(api.overlay.onMessage).not.toHaveBeenCalled();
+      windowLoaded();
+
+      expect(api.sidebar.onMessage).toHaveBeenCalledWith('host.action', expect.any(Function));
+      expect(api.sidebar.loadFile.mock.invocationCallOrder[0]).toBeLessThan(
+        api.sidebar.onMessage.mock.invocationCallOrder[0] as number,
+      );
+      expect(api.overlay.onMessage).not.toHaveBeenCalled();
+
+      overlayLoaded();
+      expect(api.overlay.onMessage).toHaveBeenCalledWith('host.action', expect.any(Function));
+      expect(api.overlay.loadFile.mock.invocationCallOrder[0]).toBeLessThan(
+        api.overlay.onMessage.mock.invocationCallOrder[0] as number,
+      );
+      expect(api.overlay.setClickable).toHaveBeenCalledWith(true);
+
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('normalizes configured titles and defaults invalid modes to prompt', () => {
     expect(parseSkipChapterTitles('Opening, opening,Ending,ENDING,, ')).toEqual([
       'opening',
@@ -691,6 +732,7 @@ describe('chapter skipping', () => {
     try {
       const { runtime, api } = createRuntime();
       runtime.install();
+      loadPlayerViews(api);
       const overlayHandler = api.overlay.onMessage.mock.calls.find(
         ([name]) => name === 'host.action',
       )?.[1] as (value: unknown) => void;

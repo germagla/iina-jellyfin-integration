@@ -28,6 +28,13 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
+/* IINA 1.4.4 hit-tests only the exact element under the pointer for
+ * data-clickable. Keep icons and other button children out of hit-testing so
+ * the attributed button remains the target across its entire visible area. */
+[data-clickable] > * {
+  pointer-events: none;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

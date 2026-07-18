@@ -69,6 +69,9 @@ describe('contextual player surfaces', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Skip Opening is available');
     expect(skip).toHaveAttribute('data-clickable');
     expect(document.querySelectorAll('[data-clickable]')).toHaveLength(1);
+    const icon = skip.querySelector('svg');
+    expect(icon).not.toBeNull();
+    expect(window.getComputedStyle(icon as SVGElement).pointerEvents).toBe('none');
     await user.click(skip);
 
     expect(host.messages).toContainEqual({
