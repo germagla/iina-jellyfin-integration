@@ -86,7 +86,7 @@ small {
   gap: 6px;
   align-items: flex-start;
   padding: 7px;
-  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border: 1px solid color-mix(in srgb, currentcolor 18%, transparent);
   border-radius: 7px;
 }
 

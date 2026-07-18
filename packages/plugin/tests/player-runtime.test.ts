@@ -432,6 +432,34 @@ describe('chapter skipping', () => {
     }
   });
 
+  it('contains native seek failures while skipping a chapter', () => {
+    const { runtime, api, logger } = createRuntime();
+    seedSession(runtime, 'playing');
+    setChapterPreferences(api, 'on');
+    api.core.getChapters.mockReturnValue([{ title: 'Ending', start: 0 }]);
+    api.mpv.getNumber.mockImplementation((name: string) =>
+      name === 'chapter' ? 0 : name === 'duration' ? 1_260 : name === 'speed' ? 1 : 0,
+    );
+    api.core.seekTo.mockImplementationOnce(() => {
+      throw new Error('native seek failed');
+    });
+    runtime.install();
+
+    expect(() => installedChapterHandler(api)()).not.toThrow();
+
+    expect(logger.warn).toHaveBeenCalledWith('player.chapter.seek-failed', {
+      chapter: 0,
+      final: true,
+    });
+    expect(api.core.osd).toHaveBeenCalledWith('This chapter could not be skipped.');
+    expect(
+      (runtime as unknown as { pendingFinalChapterSkip?: unknown }).pendingFinalChapterSkip,
+    ).toBeUndefined();
+    clearInterval(
+      (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+    );
+  });
+
   it('prompts for ten seconds and accepts only the current generation and chapter', () => {
     vi.useFakeTimers();
     try {

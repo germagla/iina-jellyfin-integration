@@ -73,6 +73,9 @@ describe('contextual player surfaces', () => {
     const icon = skip.querySelector('svg');
     expect(icon).not.toBeNull();
     expect(window.getComputedStyle(icon as SVGElement).pointerEvents).toBe('none');
+    const label = skip.querySelector('.overlay-skip-label');
+    expect(label).not.toBeNull();
+    expect(window.getComputedStyle(label as HTMLElement).textOverflow).toBe('ellipsis');
     await user.click(skip);
 
     expect(host.messages).toContainEqual({

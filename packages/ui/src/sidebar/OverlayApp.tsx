@@ -42,7 +42,7 @@ export function OverlayApp({ host: hostProp }: OverlayAppProps) {
           }
         >
           <SkipForward size={17} weight="fill" aria-hidden="true" />
-          Skip {chapterSkip.title}
+          <span className="overlay-skip-label">Skip {chapterSkip.title}</span>
         </button>
       </main>
     );

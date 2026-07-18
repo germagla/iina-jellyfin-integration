@@ -385,9 +385,13 @@ export class PlayerRuntime {
     }
     try {
       this.api.core.seekTo(target.seconds);
-    } catch (error) {
+    } catch {
       this.pendingFinalChapterSkip = undefined;
-      throw error;
+      this.logger.warn('player.chapter.seek-failed', {
+        chapter: target.chapterIndex,
+        final: target.final,
+      });
+      this.api.core.osd('This chapter could not be skipped.');
     }
   }
 
