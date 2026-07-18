@@ -42,6 +42,27 @@ select:focus-visible {
   background: #17191d;
 }
 
+.sidebar-fallback {
+  display: grid;
+  min-height: 100vh;
+  place-content: center;
+  gap: 6px;
+  padding: 24px;
+  color: var(--sidebar-muted);
+  background: #17191d;
+  text-align: center;
+}
+
+.sidebar-fallback strong {
+  color: #f5f6f8;
+  font-size: 14px;
+}
+
+.sidebar-fallback span {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .sidebar-heading {
   display: flex;
   align-items: center;

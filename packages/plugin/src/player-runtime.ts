@@ -1,6 +1,7 @@
 import {
   BaseItemSchema,
   CATALOG_OPEN_REQUEST_PREFERENCE_KEY,
+  CHAPTER_SKIP_MODE_PREFERENCE_KEY,
   PlaybackPlanSchema,
   beginPlaybackSession,
   buildPlaybackReportRequest,
@@ -16,7 +17,6 @@ import {
   type PublicPlaybackState,
 } from '@iina-jellyfin/core';
 import {
-  CHAPTER_SKIP_MODE_PREFERENCE_KEY,
   DEFAULT_PROGRESS_INTERVAL_MS,
   PLAYER_MESSAGES,
   SKIP_CHAPTER_TITLES_PREFERENCE_KEY,
@@ -54,6 +54,26 @@ const CHAPTER_SKIP_FORWARD_EPSILON_SECONDS = 0.05;
 const MAX_CHAPTER_SKIP_TITLES = 32;
 const MAX_CHAPTER_TITLE_LENGTH = 128;
 const MAX_CHAPTER_SKIP_PREFERENCE_LENGTH = 4_096;
+const WEBVIEW_ERROR_CATEGORIES = new Set([
+  'Error',
+  'TypeError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'URIError',
+  'EvalError',
+  'AggregateError',
+  'DOMException',
+  'NonError:null',
+  'NonError:string',
+  'NonError:number',
+  'NonError:boolean',
+  'NonError:undefined',
+  'NonError:object',
+  'NonError:symbol',
+  'NonError:bigint',
+  'NonError:function',
+]);
 
 export type ChapterSkipMode = 'on' | 'prompt' | 'off';
 
@@ -209,7 +229,10 @@ export class PlayerRuntime {
   private positionBaseTicks = 0;
   private progressTimer: ReturnType<typeof setInterval> | undefined;
   private sidebarReady = false;
+  private sidebarPresented = false;
   private overlayReady = false;
+  private sidebarLoadAttempt = 0;
+  private sidebarRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private upNext: UpNextState | undefined;
   private upNextTimer: ReturnType<typeof setInterval> | undefined;
   private externalSubtitlePath: string | undefined;
@@ -269,6 +292,7 @@ export class PlayerRuntime {
     });
     this.api.event.on('iina.window-will-close', () => {
       this.clearProgressTimer();
+      this.clearSidebarRecoveryTimer();
       this.clearChapterSkip(true);
       this.resetChapterTracking();
       this.pendingFinalChapterSkip = undefined;
@@ -551,6 +575,10 @@ export class PlayerRuntime {
         if (ownedLaunch !== undefined) {
           this.clearUpNext(true);
           this.cleanupPlaybackIfOwned(ownedLaunch, ownedGeneration);
+          this.sidebarPresented = false;
+          // Keep the plugin tab selected if the user leaves it open, but remove
+          // Jellyfin metadata and allow a later managed launch to present it.
+          this.publishState();
         }
         next?.();
       }
@@ -748,9 +776,11 @@ export class PlayerRuntime {
       playMethod: this.launch.plan.playMethod,
       resumed: this.launch.plan.startPositionTicks > 0,
     });
+    this.scheduleSidebarRecovery();
     // The catalog and player views should reflect native playback immediately;
     // Jellyfin reporting remains serialized but must not delay local UI state.
     this.publishState();
+    this.presentSidebarForManagedPlayback();
     this.resetChapterTracking();
     let startReport: Promise<void> | undefined;
     if (this.startedGeneration !== generation) {
@@ -1417,32 +1447,67 @@ export class PlayerRuntime {
     }
   }
 
-  private loadPlayerViews(): void {
+  private clearSidebarRecoveryTimer(): void {
+    if (this.sidebarRecoveryTimer !== undefined) clearTimeout(this.sidebarRecoveryTimer);
+    this.sidebarRecoveryTimer = undefined;
+  }
+
+  private loadSidebarView(): void {
+    this.sidebarReady = false;
+    this.sidebarLoadAttempt += 1;
+    this.logger.info('player.sidebar.loading', { attempt: this.sidebarLoadAttempt });
     this.api.sidebar.loadFile('dist/ui/sidebar/index.html');
     // IINA clears the sidebar message hub in loadFile(), so register actions
     // only after initiating the new page load.
     this.api.sidebar.onMessage('host.action', (data) => this.handleViewAction(data, 'sidebar'));
-    this.sidebarReady = true;
+  }
+
+  private scheduleSidebarRecovery(): void {
+    this.clearSidebarRecoveryTimer();
+    this.sidebarRecoveryTimer = setTimeout(() => {
+      this.sidebarRecoveryTimer = undefined;
+      if (this.sidebarReady || this.sidebarLoadAttempt >= 2) return;
+      this.logger.warn('player.sidebar.ready-timeout', { attempt: this.sidebarLoadAttempt });
+      this.loadSidebarView();
+    }, 750);
+  }
+
+  private loadPlayerViews(): void {
+    this.sidebarPresented = false;
+    this.sidebarLoadAttempt = 0;
+    this.loadSidebarView();
     this.overlayReady = false;
     this.api.overlay.loadFile('dist/ui/overlay/index.html');
-    this.publishState();
-    this.publishChapterSkipSettings();
-    this.publishChapterSkip();
-    this.publishUpNext();
   }
 
   private overlayLoaded(): void {
+    if (this.overlayReady) return;
     // overlay.onMessage() is ignored until IINA marks the webview loaded, and
     // overlay.loadFile() clears prior listeners. The loaded event is therefore
     // the first reliable point to install the action bridge.
     this.api.overlay.onMessage('host.action', (data) => this.handleViewAction(data, 'overlay'));
     this.api.overlay.setClickable(true);
-    this.overlayReady = true;
-    this.publishState();
-    this.publishChapterSkipSettings();
-    this.publishChapterSkip();
-    this.publishUpNext();
-    if (this.chapterSkip !== undefined || this.upNext !== undefined) this.api.overlay.show();
+  }
+
+  private presentSidebarForManagedPlayback(): void {
+    if (
+      this.sidebarPresented ||
+      !this.sidebarReady ||
+      this.launch === undefined ||
+      (this.session.status !== 'playing' && this.session.status !== 'paused')
+    ) {
+      return;
+    }
+    try {
+      // IINA 1.4.4's generic Plugins toolbar action opens the container without
+      // selecting a plugin tab. show() explicitly selects this plugin, attaches
+      // its webview to the native container, and gives it a usable viewport.
+      this.api.sidebar.show();
+      this.sidebarPresented = true;
+      this.logger.info('player.sidebar.presented');
+    } catch (error) {
+      this.logger.warn('Could not present the Jellyfin player sidebar', error);
+    }
   }
 
   private handleViewAction(raw: unknown, source: 'sidebar' | 'overlay'): void {
@@ -1451,6 +1516,7 @@ export class PlayerRuntime {
     const allowedActions: Record<'sidebar' | 'overlay', ReadonlySet<unknown>> = {
       sidebar: new Set([
         'host.ready',
+        'host.webviewError',
         'window.openCatalog',
         'settings.chapterSkipMode',
         'player.pause',
@@ -1458,6 +1524,7 @@ export class PlayerRuntime {
       ]),
       overlay: new Set([
         'host.ready',
+        'host.webviewError',
         'window.openCatalog',
         'chapterSkip.skip',
         'upNext.cancel',
@@ -1470,10 +1537,37 @@ export class PlayerRuntime {
       return;
     }
     if (action === 'host.ready') {
+      if (source === 'sidebar') {
+        this.sidebarReady = true;
+        this.clearSidebarRecoveryTimer();
+      } else {
+        this.overlayReady = true;
+      }
+      this.logger.info('player.webview.ready', { source });
       this.publishState();
       this.publishUpNext();
       this.publishChapterSkipSettings();
       this.publishChapterSkip();
+      if (source === 'sidebar') this.presentSidebarForManagedPlayback();
+      if (source === 'overlay' && (this.chapterSkip !== undefined || this.upNext !== undefined)) {
+        this.api.overlay.show();
+      }
+    } else if (action === 'host.webviewError') {
+      const candidate = raw as { surface?: unknown; kind?: unknown; message?: unknown };
+      const kind = candidate.kind;
+      const message = candidate.message;
+      if (
+        candidate.surface === source &&
+        (kind === 'error' || kind === 'unhandledrejection' || kind === 'render') &&
+        typeof message === 'string' &&
+        WEBVIEW_ERROR_CATEGORIES.has(message)
+      ) {
+        this.logger.error('player.webview.error', { source, kind, message });
+        if (source === 'sidebar' && kind === 'render' && this.sidebarLoadAttempt < 2) {
+          this.logger.warn('player.sidebar.render-retry', { attempt: this.sidebarLoadAttempt });
+          this.loadSidebarView();
+        }
+      }
     } else if (action === 'window.openCatalog') {
       this.api.preferences.set(CATALOG_OPEN_REQUEST_PREFERENCE_KEY, Date.now());
       this.api.preferences.sync();

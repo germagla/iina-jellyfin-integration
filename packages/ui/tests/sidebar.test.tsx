@@ -1,12 +1,13 @@
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   MockPlayerUiHost,
   parseChapterSkip,
   parseChapterSkipSettings,
   parsePlayerState,
   parseUpNext,
+  reportPlayerWebviewError,
   type ChapterSkipViewState,
   type UpNextViewState,
 } from '../src/sidebar/host';
@@ -135,6 +136,29 @@ describe('contextual player surfaces', () => {
 });
 
 describe('player message validation', () => {
+  it('does not forward webview URLs or metadata into native diagnostics', () => {
+    const postMessage = vi.fn();
+    Object.defineProperty(window, 'iina', {
+      configurable: true,
+      value: { postMessage },
+    });
+
+    reportPlayerWebviewError(
+      'sidebar',
+      'unhandledrejection',
+      new TypeError('Widow Bay failed at https://media.test/Videos/private-item/stream'),
+    );
+
+    expect(postMessage).toHaveBeenCalledWith('host.action', {
+      action: 'host.webviewError',
+      surface: 'sidebar',
+      kind: 'unhandledrejection',
+      message: 'TypeError',
+    });
+    expect(JSON.stringify(postMessage.mock.calls)).not.toContain('Widow Bay');
+    expect(JSON.stringify(postMessage.mock.calls)).not.toContain('https://');
+  });
+
   it('rejects malformed or secret-shaped player messages', () => {
     expect(parsePlayerState({ status: 'playing', positionTicks: 0 })).toBeUndefined();
     expect(

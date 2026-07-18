@@ -5893,6 +5893,7 @@
 
   // packages/core/src/preference-contracts.ts
   var CATALOG_OPEN_REQUEST_PREFERENCE_KEY = "catalogOpenRequestAtMs";
+  var CHAPTER_SKIP_MODE_PREFERENCE_KEY = "chapterSkipMode";
 
   // packages/core/src/redaction.ts
   var REDACTED = "[REDACTED]";
@@ -6389,7 +6390,6 @@
   // packages/plugin/src/constants.ts
   var DEFAULT_PROGRESS_INTERVAL_MS = 1e4;
   var DEFAULT_ARTWORK_LIMIT_BYTES = 8 * 1024 * 1024;
-  var CHAPTER_SKIP_MODE_PREFERENCE_KEY = "chapterSkipMode";
   var SKIP_CHAPTER_TITLES_PREFERENCE_KEY = "skipChapterTitles";
   var PLAYER_MESSAGES = {
     catalogOpen: "jellyfin.catalog.open",
@@ -6430,6 +6430,26 @@
   var MAX_CHAPTER_SKIP_TITLES = 32;
   var MAX_CHAPTER_TITLE_LENGTH = 128;
   var MAX_CHAPTER_SKIP_PREFERENCE_LENGTH = 4096;
+  var WEBVIEW_ERROR_CATEGORIES = /* @__PURE__ */ new Set([
+    "Error",
+    "TypeError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "URIError",
+    "EvalError",
+    "AggregateError",
+    "DOMException",
+    "NonError:null",
+    "NonError:string",
+    "NonError:number",
+    "NonError:boolean",
+    "NonError:undefined",
+    "NonError:object",
+    "NonError:symbol",
+    "NonError:bigint",
+    "NonError:function"
+  ]);
   function safeHeaders(headers) {
     const result = [];
     for (const [name, value] of Object.entries(headers)) {
@@ -6526,7 +6546,10 @@
     positionBaseTicks = 0;
     progressTimer;
     sidebarReady = false;
+    sidebarPresented = false;
     overlayReady = false;
+    sidebarLoadAttempt = 0;
+    sidebarRecoveryTimer;
     upNext;
     upNextTimer;
     externalSubtitlePath;
@@ -6577,6 +6600,7 @@
       });
       this.api.event.on("iina.window-will-close", () => {
         this.clearProgressTimer();
+        this.clearSidebarRecoveryTimer();
         this.clearChapterSkip(true);
         this.resetChapterTracking();
         this.pendingFinalChapterSkip = void 0;
@@ -6809,6 +6833,8 @@
           if (ownedLaunch !== void 0) {
             this.clearUpNext(true);
             this.cleanupPlaybackIfOwned(ownedLaunch, ownedGeneration);
+            this.sidebarPresented = false;
+            this.publishState();
           }
           next?.();
         }
@@ -6973,7 +6999,9 @@
         playMethod: this.launch.plan.playMethod,
         resumed: this.launch.plan.startPositionTicks > 0
       });
+      this.scheduleSidebarRecovery();
       this.publishState();
+      this.presentSidebarForManagedPlayback();
       this.resetChapterTracking();
       let startReport;
       if (this.startedGeneration !== generation) {
@@ -7539,26 +7567,49 @@
         if (hideOverlay && this.chapterSkip === void 0) this.api.overlay.hide();
       }
     }
-    loadPlayerViews() {
+    clearSidebarRecoveryTimer() {
+      if (this.sidebarRecoveryTimer !== void 0) clearTimeout(this.sidebarRecoveryTimer);
+      this.sidebarRecoveryTimer = void 0;
+    }
+    loadSidebarView() {
+      this.sidebarReady = false;
+      this.sidebarLoadAttempt += 1;
+      this.logger.info("player.sidebar.loading", { attempt: this.sidebarLoadAttempt });
       this.api.sidebar.loadFile("dist/ui/sidebar/index.html");
       this.api.sidebar.onMessage("host.action", (data) => this.handleViewAction(data, "sidebar"));
-      this.sidebarReady = true;
+    }
+    scheduleSidebarRecovery() {
+      this.clearSidebarRecoveryTimer();
+      this.sidebarRecoveryTimer = setTimeout(() => {
+        this.sidebarRecoveryTimer = void 0;
+        if (this.sidebarReady || this.sidebarLoadAttempt >= 2) return;
+        this.logger.warn("player.sidebar.ready-timeout", { attempt: this.sidebarLoadAttempt });
+        this.loadSidebarView();
+      }, 750);
+    }
+    loadPlayerViews() {
+      this.sidebarPresented = false;
+      this.sidebarLoadAttempt = 0;
+      this.loadSidebarView();
       this.overlayReady = false;
       this.api.overlay.loadFile("dist/ui/overlay/index.html");
-      this.publishState();
-      this.publishChapterSkipSettings();
-      this.publishChapterSkip();
-      this.publishUpNext();
     }
     overlayLoaded() {
+      if (this.overlayReady) return;
       this.api.overlay.onMessage("host.action", (data) => this.handleViewAction(data, "overlay"));
       this.api.overlay.setClickable(true);
-      this.overlayReady = true;
-      this.publishState();
-      this.publishChapterSkipSettings();
-      this.publishChapterSkip();
-      this.publishUpNext();
-      if (this.chapterSkip !== void 0 || this.upNext !== void 0) this.api.overlay.show();
+    }
+    presentSidebarForManagedPlayback() {
+      if (this.sidebarPresented || !this.sidebarReady || this.launch === void 0 || this.session.status !== "playing" && this.session.status !== "paused") {
+        return;
+      }
+      try {
+        this.api.sidebar.show();
+        this.sidebarPresented = true;
+        this.logger.info("player.sidebar.presented");
+      } catch (error) {
+        this.logger.warn("Could not present the Jellyfin player sidebar", error);
+      }
     }
     handleViewAction(raw, source) {
       if (raw === null || typeof raw !== "object") return;
@@ -7566,6 +7617,7 @@
       const allowedActions = {
         sidebar: /* @__PURE__ */ new Set([
           "host.ready",
+          "host.webviewError",
           "window.openCatalog",
           "settings.chapterSkipMode",
           "player.pause",
@@ -7573,6 +7625,7 @@
         ]),
         overlay: /* @__PURE__ */ new Set([
           "host.ready",
+          "host.webviewError",
           "window.openCatalog",
           "chapterSkip.skip",
           "upNext.cancel",
@@ -7585,10 +7638,32 @@
         return;
       }
       if (action === "host.ready") {
+        if (source === "sidebar") {
+          this.sidebarReady = true;
+          this.clearSidebarRecoveryTimer();
+        } else {
+          this.overlayReady = true;
+        }
+        this.logger.info("player.webview.ready", { source });
         this.publishState();
         this.publishUpNext();
         this.publishChapterSkipSettings();
         this.publishChapterSkip();
+        if (source === "sidebar") this.presentSidebarForManagedPlayback();
+        if (source === "overlay" && (this.chapterSkip !== void 0 || this.upNext !== void 0)) {
+          this.api.overlay.show();
+        }
+      } else if (action === "host.webviewError") {
+        const candidate = raw;
+        const kind = candidate.kind;
+        const message = candidate.message;
+        if (candidate.surface === source && (kind === "error" || kind === "unhandledrejection" || kind === "render") && typeof message === "string" && WEBVIEW_ERROR_CATEGORIES.has(message)) {
+          this.logger.error("player.webview.error", { source, kind, message });
+          if (source === "sidebar" && kind === "render" && this.sidebarLoadAttempt < 2) {
+            this.logger.warn("player.sidebar.render-retry", { attempt: this.sidebarLoadAttempt });
+            this.loadSidebarView();
+          }
+        }
       } else if (action === "window.openCatalog") {
         this.api.preferences.set(CATALOG_OPEN_REQUEST_PREFERENCE_KEY, Date.now());
         this.api.preferences.sync();

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-zrNLx7D/wGa/pyMq/3H38/iSaf8jXnKTA8LwEuIvecQ='; style-src 'sha256-sVYGW+7Mmt80P8wNiul2ovSVKsd+ArG2lj+7oeePfxw='; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'none'; script-src 'sha256-vjdGZdaq3SXlq18J4pVFkC/hsz2jUOwKtNuCz+/iA6M='; style-src 'sha256-sVYGW+7Mmt80P8wNiul2ovSVKsd+ArG2lj+7oeePfxw='; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
@@ -35,7 +35,7 @@
           <span><strong>On</strong><small>Skip matching chapters automatically</small></span>
         </label>
         <label>
-          <input type="radio" name="chapterSkipMode" value="prompt" checked />
+          <input type="radio" name="chapterSkipMode" value="prompt" />
           <span><strong>Prompt</strong><small>Show a skip button for ten seconds</small></span>
         </label>
         <label>
@@ -82,6 +82,6 @@
       </p>
     </section>
 
-  <script>const l="catalogOpenRequestAtMs",r="diagnosticLogRevealRequestAtMs";function d(n,a,s=Date.now){const i=n.querySelector("[data-open-catalog]"),t=n.querySelector("[data-open-status]");i!==null&&t!==null&&i.addEventListener("click",()=>{if(a===void 0){t.dataset.state="error",t.textContent="Use IINA’s Plugins menu → Open Jellyfin Library.";return}try{a.set(l,s()),delete t.dataset.state,t.textContent="Opening the Jellyfin Library…"}catch{t.dataset.state="error",t.textContent="Could not open the library. Use IINA’s Plugins menu instead."}});const o=n.querySelector("[data-reveal-diagnostics]"),e=n.querySelector("[data-diagnostics-status]");o===null||e===null||o.addEventListener("click",()=>{if(a===void 0){e.dataset.state="error",e.textContent="Use IINA’s Plugins menu → Reveal Jellyfin Diagnostic Log.";return}try{a.set(r,s()),delete e.dataset.state,e.textContent="Revealing the diagnostic log in Finder…"}catch{e.dataset.state="error",e.textContent="Could not reveal the log. Use IINA’s Plugins menu instead."}})}const u=window.iina?.preferences;d(document,u);
+  <script>const c="catalogOpenRequestAtMs",d="diagnosticLogRevealRequestAtMs",r="chapterSkipMode";function l(e){return e==="on"||e==="prompt"||e==="off"}function u(e,n){const o=Array.from(e.querySelectorAll('input[type="radio"][name="chapterSkipMode"]')).filter(t=>l(t.value));if(o.length!==3)return;const s=t=>{for(const i of o)i.checked=i.value===t};let a=!1;s("prompt");for(const t of o)t.addEventListener("change",()=>{t.checked&&n!==void 0&&(a=!0,n.set(r,t.value))});if(n?.get!==void 0)try{n.get(r,t=>{a||s(l(t)?t:"prompt")})}catch{s("prompt")}}function E(e,n,o=Date.now){u(e,n);const s=e.querySelector("[data-open-catalog]"),a=e.querySelector("[data-open-status]");s!==null&&a!==null&&s.addEventListener("click",()=>{if(n===void 0){a.dataset.state="error",a.textContent="Use IINA’s Plugins menu → Open Jellyfin Library.";return}try{n.set(c,o()),delete a.dataset.state,a.textContent="Opening the Jellyfin Library…"}catch{a.dataset.state="error",a.textContent="Could not open the library. Use IINA’s Plugins menu instead."}});const t=e.querySelector("[data-reveal-diagnostics]"),i=e.querySelector("[data-diagnostics-status]");t===null||i===null||t.addEventListener("click",()=>{if(n===void 0){i.dataset.state="error",i.textContent="Use IINA’s Plugins menu → Reveal Jellyfin Diagnostic Log.";return}try{n.set(d,o()),delete i.dataset.state,i.textContent="Revealing the diagnostic log in Finder…"}catch{i.dataset.state="error",i.textContent="Could not reveal the log. Use IINA’s Plugins menu instead."}})}const g=window.iina?.preferences;E(document,g);
 </script></body>
 </html>

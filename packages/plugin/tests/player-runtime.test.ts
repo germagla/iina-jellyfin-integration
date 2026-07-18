@@ -83,7 +83,7 @@ function createRuntime() {
       command: vi.fn(),
     },
     preferences: { get: vi.fn(), set: vi.fn(), sync: vi.fn() },
-    sidebar: { loadFile: vi.fn(), onMessage: vi.fn(), postMessage: vi.fn() },
+    sidebar: { loadFile: vi.fn(), onMessage: vi.fn(), postMessage: vi.fn(), show: vi.fn() },
     overlay: {
       loadFile: vi.fn(),
       onMessage: vi.fn(),
@@ -161,10 +161,18 @@ function loadPlayerViews(api: ReturnType<typeof createRuntime>['api']): void {
     ([name]) => name === 'iina.window-loaded',
   )?.[1] as () => void;
   windowLoaded();
+  const sidebarHandler = api.sidebar.onMessage.mock.calls.find(
+    ([name]) => name === 'host.action',
+  )?.[1] as (value: unknown) => void;
+  sidebarHandler({ action: 'host.ready' });
   const overlayLoaded = api.event.on.mock.calls.find(
     ([name]) => name === 'iina.plugin-overlay-loaded',
   )?.[1] as () => void;
   overlayLoaded();
+  const overlayHandler = api.overlay.onMessage.mock.calls.find(
+    ([name]) => name === 'host.action',
+  )?.[1] as (value: unknown) => void;
+  overlayHandler({ action: 'host.ready' });
 }
 
 describe('chapter skipping', () => {
@@ -189,6 +197,18 @@ describe('chapter skipping', () => {
         api.sidebar.onMessage.mock.invocationCallOrder[0] as number,
       );
       expect(api.overlay.onMessage).not.toHaveBeenCalled();
+      expect(api.sidebar.postMessage).not.toHaveBeenCalledWith(
+        'player.chapterSkipSettings',
+        expect.anything(),
+      );
+
+      const sidebarHandler = api.sidebar.onMessage.mock.calls.find(
+        ([name]) => name === 'host.action',
+      )?.[1] as (value: unknown) => void;
+      sidebarHandler({ action: 'host.ready' });
+      expect(api.sidebar.postMessage).toHaveBeenCalledWith('player.chapterSkipSettings', {
+        mode: 'prompt',
+      });
 
       overlayLoaded();
       expect(api.overlay.onMessage).toHaveBeenCalledWith('host.action', expect.any(Function));
@@ -196,6 +216,18 @@ describe('chapter skipping', () => {
         api.overlay.onMessage.mock.invocationCallOrder[0] as number,
       );
       expect(api.overlay.setClickable).toHaveBeenCalledWith(true);
+      expect(api.overlay.postMessage).not.toHaveBeenCalledWith(
+        'player.chapterSkipSettings',
+        expect.anything(),
+      );
+
+      const overlayHandler = api.overlay.onMessage.mock.calls.find(
+        ([name]) => name === 'host.action',
+      )?.[1] as (value: unknown) => void;
+      overlayHandler({ action: 'host.ready' });
+      expect(api.overlay.postMessage).toHaveBeenCalledWith('player.chapterSkipSettings', {
+        mode: 'prompt',
+      });
 
       clearInterval(
         (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
@@ -203,6 +235,134 @@ describe('chapter skipping', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('retries the sidebar once after media load when its webview never becomes ready', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api, logger } = createRuntime();
+      runtime.install();
+      const windowLoaded = api.event.on.mock.calls.find(
+        ([name]) => name === 'iina.window-loaded',
+      )?.[1] as () => void;
+      windowLoaded();
+
+      (runtime as unknown as { scheduleSidebarRecovery(): void }).scheduleSidebarRecovery();
+      vi.advanceTimersByTime(750);
+
+      expect(api.sidebar.loadFile).toHaveBeenCalledTimes(2);
+      expect(logger.warn).toHaveBeenCalledWith('player.sidebar.ready-timeout', { attempt: 1 });
+      vi.advanceTimersByTime(750);
+      expect(api.sidebar.loadFile).toHaveBeenCalledTimes(2);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels sidebar recovery after the webview handshake', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      runtime.install();
+      const windowLoaded = api.event.on.mock.calls.find(
+        ([name]) => name === 'iina.window-loaded',
+      )?.[1] as () => void;
+      windowLoaded();
+      (runtime as unknown as { scheduleSidebarRecovery(): void }).scheduleSidebarRecovery();
+      const sidebarHandler = api.sidebar.onMessage.mock.calls.find(
+        ([name]) => name === 'host.action',
+      )?.[1] as (value: unknown) => void;
+      sidebarHandler({ action: 'host.ready' });
+      vi.advanceTimersByTime(750);
+
+      expect(api.sidebar.loadFile).toHaveBeenCalledTimes(1);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reloads the sidebar once after a reported render failure', () => {
+    const { runtime, api, logger } = createRuntime();
+    runtime.install();
+    const windowLoaded = api.event.on.mock.calls.find(
+      ([name]) => name === 'iina.window-loaded',
+    )?.[1] as () => void;
+    windowLoaded();
+
+    const firstHandler = api.sidebar.onMessage.mock.calls.find(
+      ([name]) => name === 'host.action',
+    )?.[1] as (value: unknown) => void;
+    firstHandler({
+      action: 'host.webviewError',
+      surface: 'sidebar',
+      kind: 'render',
+      message: 'TypeError',
+    });
+
+    expect(api.sidebar.loadFile).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith('player.sidebar.render-retry', { attempt: 1 });
+    const secondHandler = api.sidebar.onMessage.mock.calls.at(-1)?.[1] as (value: unknown) => void;
+    secondHandler({
+      action: 'host.webviewError',
+      surface: 'sidebar',
+      kind: 'render',
+      message: 'TypeError',
+    });
+    expect(api.sidebar.loadFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects webview diagnostic messages containing URLs or metadata', () => {
+    const { runtime, api, logger } = createRuntime();
+    runtime.install();
+    const windowLoaded = api.event.on.mock.calls.find(
+      ([name]) => name === 'iina.window-loaded',
+    )?.[1] as () => void;
+    windowLoaded();
+    const sidebarHandler = api.sidebar.onMessage.mock.calls.find(
+      ([name]) => name === 'host.action',
+    )?.[1] as (value: unknown) => void;
+
+    sidebarHandler({
+      action: 'host.webviewError',
+      surface: 'sidebar',
+      kind: 'render',
+      message: 'Widow Bay failed at https://media.test/Videos/private-item/stream',
+    });
+
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(api.sidebar.loadFile).toHaveBeenCalledOnce();
+  });
+
+  it('selects the Jellyfin sidebar once managed playback starts', async () => {
+    const { runtime, api } = createRuntime();
+    runtime.install();
+    seedSession(runtime, 'preparing');
+    loadPlayerViews(api);
+
+    expect(api.sidebar.show).not.toHaveBeenCalled();
+    await (runtime as unknown as { mediaLoaded(): Promise<void> }).mediaLoaded();
+
+    expect(api.sidebar.show).toHaveBeenCalledOnce();
+    const sidebarHandler = api.sidebar.onMessage.mock.calls.find(
+      ([name]) => name === 'host.action',
+    )?.[1] as (value: unknown) => void;
+    sidebarHandler({ action: 'host.ready' });
+    expect(api.sidebar.show).toHaveBeenCalledOnce();
+  });
+
+  it('does not open the sidebar in an unmanaged IINA player', () => {
+    const { runtime, api } = createRuntime();
+    runtime.install();
+
+    loadPlayerViews(api);
+
+    expect(api.sidebar.show).not.toHaveBeenCalled();
   });
 
   it('normalizes configured titles and defaults invalid modes to prompt', () => {
@@ -1029,6 +1189,27 @@ describe('player runtime boundaries', () => {
     await vi.waitFor(() => expect(transport.execute).toHaveBeenCalledOnce());
     finishReport?.();
     await internals.reportQueue;
+  });
+
+  it('clears and can re-present the sidebar after an external load', async () => {
+    const { runtime, api } = createRuntime();
+    runtime.install();
+    seedSession(runtime, 'playing');
+    loadPlayerViews(api);
+    expect(api.sidebar.show).toHaveBeenCalledOnce();
+
+    api.mpv.getString.mockReturnValue('https://unrelated.example/video.mp4');
+    await (runtime as unknown as { resolveLoad(next?: () => void): Promise<void> }).resolveLoad();
+
+    const stateMessages = api.sidebar.postMessage.mock.calls.filter(
+      ([name]) => name === 'player.state',
+    );
+    expect(stateMessages.at(-1)?.[1]).toMatchObject({ status: 'stopped' });
+    expect(stateMessages.at(-1)?.[1]).not.toHaveProperty('title', expect.any(String));
+
+    seedSession(runtime, 'preparing');
+    await (runtime as unknown as { mediaLoaded(): Promise<void> }).mediaLoaded();
+    expect(api.sidebar.show).toHaveBeenCalledTimes(2);
   });
 
   it('reports playback start and attaches a resolved temporary subtitle only after file-loaded', async () => {

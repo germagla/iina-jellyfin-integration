@@ -1,6 +1,7 @@
 import { fireEvent } from '@testing-library/react';
 import {
   CATALOG_OPEN_REQUEST_PREFERENCE_KEY,
+  CHAPTER_SKIP_MODE_PREFERENCE_KEY,
   DIAGNOSTIC_LOG_REVEAL_REQUEST_PREFERENCE_KEY,
 } from '@iina-jellyfin/core/preference-contracts';
 import { describe, expect, it, vi } from 'vitest';
@@ -26,6 +27,15 @@ function renderDiagnosticControls() {
     button: document.querySelector<HTMLButtonElement>('[data-reveal-diagnostics]')!,
     status: document.querySelector<HTMLElement>('[data-diagnostics-status]')!,
   };
+}
+
+function renderChapterSkipModes() {
+  document.body.innerHTML = `
+    <input type="radio" name="chapterSkipMode" value="on" />
+    <input type="radio" name="chapterSkipMode" value="prompt" />
+    <input type="radio" name="chapterSkipMode" value="off" />
+  `;
+  return Array.from(document.querySelectorAll<HTMLInputElement>('input[name="chapterSkipMode"]'));
 }
 
 describe('plugin preferences', () => {
@@ -62,5 +72,46 @@ describe('plugin preferences', () => {
       1_800_000_000_000,
     );
     expect(status).toHaveTextContent('Revealing the diagnostic log in Finder');
+  });
+
+  it('restores and persists the chapter skip mode through IINA custom binding', () => {
+    const inputs = renderChapterSkipModes();
+    const set = vi.fn();
+    const get = vi.fn((_key: string, callback: (value: unknown) => void) => callback('off'));
+
+    bindPreferencesPage(document, { get, set });
+
+    expect(get).toHaveBeenCalledWith(CHAPTER_SKIP_MODE_PREFERENCE_KEY, expect.any(Function));
+    expect(inputs.find((input) => input.checked)?.value).toBe('off');
+    fireEvent.click(inputs[0]!);
+    expect(set).toHaveBeenCalledWith(CHAPTER_SKIP_MODE_PREFERENCE_KEY, 'on');
+  });
+
+  it('uses Prompt when the stored chapter skip mode is absent or invalid', () => {
+    const inputs = renderChapterSkipModes();
+    bindPreferencesPage(document, {
+      set: vi.fn(),
+      get: (_key, callback) => callback('automatic'),
+    });
+
+    expect(inputs.find((input) => input.checked)?.value).toBe('prompt');
+  });
+
+  it('does not let a delayed preference read overwrite a newer choice', () => {
+    const inputs = renderChapterSkipModes();
+    const set = vi.fn();
+    let resolvePreference: ((value: unknown) => void) | undefined;
+    bindPreferencesPage(document, {
+      set,
+      get: (_key, callback) => {
+        resolvePreference = callback;
+      },
+    });
+
+    fireEvent.click(inputs[0]!);
+    resolvePreference?.('off');
+
+    expect(set).toHaveBeenCalledWith(CHAPTER_SKIP_MODE_PREFERENCE_KEY, 'on');
+    expect(inputs.find((input) => input.checked)?.value).toBe('on');
   });
 });

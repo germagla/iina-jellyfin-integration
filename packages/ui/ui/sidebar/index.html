@@ -11,7 +11,9 @@
     <title>Jellyfin Now Playing</title>
   </head>
   <body class="sidebar-document">
-    <div id="root"></div>
+    <div id="root">
+      <main class="sidebar-fallback" role="status">Loading Jellyfin…</main>
+    </div>
     <script type="module" src="/src/sidebar-main.tsx"></script>
   </body>
 </html>

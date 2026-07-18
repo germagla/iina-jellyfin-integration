@@ -1,5 +1,6 @@
 export type PlayerUiAction =
   | 'host.ready'
+  | 'host.webviewError'
   | 'window.openCatalog'
   | 'settings.autoplay'
   | 'settings.chapterSkipMode'
@@ -61,6 +62,53 @@ export interface PlayerUiHost {
   subscribeUpNext(listener: (state: UpNextViewState | undefined) => void): () => void;
   subscribeChapterSkip(listener: (state: ChapterSkipViewState | undefined) => void): () => void;
   subscribeChapterSkipSettings(listener: (state: ChapterSkipSettingsState) => void): () => void;
+}
+
+export type PlayerWebviewSurface = 'sidebar' | 'overlay';
+export type PlayerWebviewErrorKind = 'error' | 'unhandledrejection' | 'render';
+
+const WEBVIEW_ERROR_NAMES = new Set([
+  'Error',
+  'TypeError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'URIError',
+  'EvalError',
+  'AggregateError',
+  'DOMException',
+]);
+
+function describeWebviewError(value: unknown): string {
+  // Exception messages may contain a media URL, Jellyfin metadata, or another
+  // user-controlled value. Preserve only a conventional error class so the
+  // diagnostic log remains useful without copying webview content into it.
+  if (value instanceof Error) {
+    return WEBVIEW_ERROR_NAMES.has(value.name) ? value.name : 'Error';
+  }
+  return value === null ? 'NonError:null' : `NonError:${typeof value}`;
+}
+
+export function reportPlayerWebviewError(
+  surface: PlayerWebviewSurface,
+  kind: PlayerWebviewErrorKind,
+  value: unknown,
+): void {
+  window.iina?.postMessage('host.action', {
+    action: 'host.webviewError',
+    surface,
+    kind,
+    message: describeWebviewError(value),
+  });
+}
+
+export function installPlayerWebviewErrorReporting(surface: PlayerWebviewSurface): void {
+  window.addEventListener('error', (event) => {
+    reportPlayerWebviewError(surface, 'error', event.error ?? event.message);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    reportPlayerWebviewError(surface, 'unhandledrejection', event.reason);
+  });
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -220,6 +268,10 @@ class NativePlayerUiHost implements PlayerUiHost {
       for (const listener of this.chapterSkipSettingsListeners) listener(state);
     });
     void this.send('host.ready');
+    // IINA installs the native overlay listener from its didFinish callback,
+    // after this document's first script turn can already have completed.
+    // Repeat the idempotent handshake once so the overlay cannot miss it.
+    window.setTimeout(() => void this.send('host.ready'), 250);
   }
 
   async send(action: PlayerUiAction, payload: Record<string, unknown> = {}): Promise<void> {
