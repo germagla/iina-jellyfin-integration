@@ -1,5 +1,5 @@
-import { FilmSlate, Play, SpinnerGap } from '@phosphor-icons/react';
-import { useState } from 'react';
+import { FilmSlate, Play, SkipForward, SpinnerGap } from '@phosphor-icons/react';
+import { useEffect, useState } from 'react';
 import { Artwork } from '../catalog/Artwork';
 import { createPlayerUiHost, type PlayerUiHost } from './host';
 import { useUpNext } from './useUpNext';
@@ -12,6 +12,41 @@ export interface OverlayAppProps {
 export function OverlayApp({ host: hostProp }: OverlayAppProps) {
   const [host] = useState(() => hostProp ?? createPlayerUiHost());
   const upNext = useUpNext(host);
+  const [chapterSkip, setChapterSkip] = useState(() => host.getChapterSkip());
+  useEffect(() => host.subscribeChapterSkip(setChapterSkip), [host]);
+
+  if (upNext.upNext === undefined && chapterSkip === undefined) return null;
+
+  if (upNext.upNext === undefined && chapterSkip !== undefined) {
+    return (
+      <main
+        className="overlay-shell overlay-shell--chapter-skip"
+        aria-label={`Skip ${chapterSkip.title}`}
+      >
+        <span className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+          Skip {chapterSkip.title} is available
+        </span>
+        <div className="overlay-copy">
+          <p>Chapter</p>
+          <h1>{chapterSkip.title}</h1>
+        </div>
+        <button
+          className="overlay-play overlay-skip"
+          data-clickable
+          type="button"
+          onClick={() =>
+            void host.send('chapterSkip.skip', {
+              generation: chapterSkip.generation,
+              chapterIndex: chapterSkip.chapterIndex,
+            })
+          }
+        >
+          <SkipForward size={17} weight="fill" aria-hidden="true" />
+          <span className="overlay-skip-label">Skip {chapterSkip.title}</span>
+        </button>
+      </main>
+    );
+  }
 
   if (upNext.upNext === undefined) return null;
 

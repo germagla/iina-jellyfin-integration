@@ -78,6 +78,24 @@ async function smokeSurface(surface, options = {}) {
           errors.push('preferences script did not bind the library action');
         }
       }
+      const chapterModes = [
+        ...dom.window.document.querySelectorAll('input[type="radio"][name="chapterSkipMode"]'),
+      ];
+      const chapterTitles = dom.window.document.querySelector(
+        '[data-pref-key="skipChapterTitles"]',
+      );
+      if (chapterModes.length !== 3) {
+        errors.push('preferences are missing the chapter skip mode control');
+      } else if (chapterModes.map((input) => input.value).join(',') !== 'on,prompt,off') {
+        errors.push('chapter skip mode must expose on, prompt, and off');
+      } else if (chapterModes.find((input) => input.checked)?.value !== 'prompt') {
+        errors.push('chapter skip mode must render prompt as its safe default');
+      }
+      if (!(chapterTitles instanceof dom.window.HTMLInputElement)) {
+        errors.push('preferences are missing the chapter title control');
+      } else if (chapterTitles.maxLength !== 4_096) {
+        errors.push('chapter title input must cap untrusted preference size');
+      }
     } else {
       const root = dom.window.document.querySelector('#root');
       if (root === null) {

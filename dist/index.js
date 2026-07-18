@@ -5893,6 +5893,7 @@
 
   // packages/core/src/preference-contracts.ts
   var CATALOG_OPEN_REQUEST_PREFERENCE_KEY = "catalogOpenRequestAtMs";
+  var CHAPTER_SKIP_MODE_PREFERENCE_KEY = "chapterSkipMode";
 
   // packages/core/src/redaction.ts
   var REDACTED = "[REDACTED]";
@@ -6389,6 +6390,7 @@
   // packages/plugin/src/constants.ts
   var DEFAULT_PROGRESS_INTERVAL_MS = 1e4;
   var DEFAULT_ARTWORK_LIMIT_BYTES = 8 * 1024 * 1024;
+  var SKIP_CHAPTER_TITLES_PREFERENCE_KEY = "skipChapterTitles";
   var PLAYER_MESSAGES = {
     catalogOpen: "jellyfin.catalog.open",
     closed: "jellyfin.player.closed",
@@ -6422,6 +6424,32 @@
   };
   var MAX_EXTERNAL_SUBTITLE_BYTES = 10 * 1024 * 1024;
   var CORE_STOP_ACK_TIMEOUT_MS = 750;
+  var CHAPTER_SKIP_PROMPT_MS = 1e4;
+  var FINAL_CHAPTER_END_OFFSET_SECONDS = 1;
+  var CHAPTER_SKIP_FORWARD_EPSILON_SECONDS = 0.05;
+  var MAX_CHAPTER_SKIP_TITLES = 32;
+  var MAX_CHAPTER_TITLE_LENGTH = 128;
+  var MAX_CHAPTER_SKIP_PREFERENCE_LENGTH = 4096;
+  var WEBVIEW_ERROR_CATEGORIES = /* @__PURE__ */ new Set([
+    "Error",
+    "TypeError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "URIError",
+    "EvalError",
+    "AggregateError",
+    "DOMException",
+    "NonError:null",
+    "NonError:string",
+    "NonError:number",
+    "NonError:boolean",
+    "NonError:undefined",
+    "NonError:object",
+    "NonError:symbol",
+    "NonError:bigint",
+    "NonError:function"
+  ]);
   function safeHeaders(headers) {
     const result = [];
     for (const [name, value] of Object.entries(headers)) {
@@ -6452,6 +6480,50 @@
     const serverStartOffset = transcodeStartOffset(plan);
     return ticksToSeconds(Math.max(0, plan.startPositionTicks - serverStartOffset));
   }
+  function parseChapterSkipMode(value) {
+    return value === "on" || value === "prompt" || value === "off" ? value : "prompt";
+  }
+  function parseSkipChapterTitles(value) {
+    if (typeof value !== "string") return [];
+    return [
+      ...new Set(
+        value.slice(0, MAX_CHAPTER_SKIP_PREFERENCE_LENGTH).split(",").map((title) => title.trim().slice(0, MAX_CHAPTER_TITLE_LENGTH).toLowerCase()).filter((title) => title.length > 0)
+      )
+    ].slice(0, MAX_CHAPTER_SKIP_TITLES);
+  }
+  function chapterSkipTarget(chapters, chapterIndex, durationSeconds, currentPositionSeconds) {
+    if (!Number.isSafeInteger(chapterIndex) || chapterIndex < 0) return void 0;
+    const current = chapters[chapterIndex];
+    if (current === void 0 || !Number.isFinite(current.start) || current.start < 0)
+      return void 0;
+    const next = chapters[chapterIndex + 1];
+    if (next !== void 0) {
+      if (!Number.isFinite(next.start) || next.start <= current.start) return void 0;
+      if (currentPositionSeconds !== void 0 && Number.isFinite(currentPositionSeconds) && next.start <= currentPositionSeconds + CHAPTER_SKIP_FORWARD_EPSILON_SECONDS) {
+        return void 0;
+      }
+      return {
+        chapterIndex,
+        title: current.title.trim().slice(0, MAX_CHAPTER_TITLE_LENGTH),
+        seconds: next.start,
+        final: false
+      };
+    }
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= FINAL_CHAPTER_END_OFFSET_SECONDS) {
+      return void 0;
+    }
+    const seconds = durationSeconds - FINAL_CHAPTER_END_OFFSET_SECONDS;
+    if (seconds <= current.start) return void 0;
+    if (currentPositionSeconds !== void 0 && Number.isFinite(currentPositionSeconds) && seconds <= currentPositionSeconds + CHAPTER_SKIP_FORWARD_EPSILON_SECONDS) {
+      return void 0;
+    }
+    return {
+      chapterIndex,
+      title: current.title.trim().slice(0, MAX_CHAPTER_TITLE_LENGTH),
+      seconds,
+      final: true
+    };
+  }
   function mediaTitle(display) {
     if (display.seriesName !== void 0 && display.seasonNumber !== void 0 && display.episodeNumber !== void 0) {
       return `${display.seriesName} — S${String(display.seasonNumber).padStart(2, "0")}E${String(display.episodeNumber).padStart(2, "0")} — ${display.title}`;
@@ -6474,7 +6546,10 @@
     positionBaseTicks = 0;
     progressTimer;
     sidebarReady = false;
+    sidebarPresented = false;
     overlayReady = false;
+    sidebarLoadAttempt = 0;
+    sidebarRecoveryTimer;
     upNext;
     upNextTimer;
     externalSubtitlePath;
@@ -6488,7 +6563,16 @@
     playbackStateSequence = 0;
     playbackStartedAtMs = 0;
     playbackStatePersistenceFailed = false;
+    chapterSkipMode = "prompt";
+    chapterSkipTitles = [];
+    chapterSkip;
+    chapterSkipTimer;
+    observedChapterIndex;
+    handledChapterKey;
+    unavailableChapterKey;
+    pendingFinalChapterSkip;
     install() {
+      this.readChapterSkipPreferences();
       this.api.global.onMessage(PLAYER_MESSAGES.launch, (raw) => this.receiveLaunch(raw));
       this.api.global.onMessage(PLAYER_MESSAGES.stop, (raw) => {
         const requested = raw.reason;
@@ -6503,23 +6587,28 @@
         await this.resolveLoad(next);
       });
       this.api.event.on("iina.window-loaded", () => this.loadPlayerViews());
+      this.api.event.on("iina.plugin-overlay-loaded", () => this.overlayLoaded());
       this.api.event.on("iina.file-loaded", () => void this.mediaLoaded());
       this.api.event.on("mpv.pause.changed", () => void this.pauseChanged());
       this.api.event.on("mpv.speed.changed", () => this.playbackTimingChanged());
       this.api.event.on("mpv.paused-for-cache.changed", () => this.playbackTimingChanged());
+      this.api.event.on("mpv.chapter.changed", () => this.reconcileChapterSkip());
+      this.api.event.on("mpv.duration.changed", () => this.reconcileChapterSkip());
       this.api.event.on("mpv.seek", () => void this.reportImmediate("seek"));
       this.api.event.on("mpv.end-file", () => {
         this.handleEndFile();
       });
       this.api.event.on("iina.window-will-close", () => {
         this.clearProgressTimer();
+        this.clearSidebarRecoveryTimer();
+        this.clearChapterSkip(true);
+        this.resetChapterTracking();
+        this.pendingFinalChapterSkip = void 0;
         this.replacementSequence += 1;
         this.discardPendingHandoffs();
         this.invalidatePendingLoads();
         this.enqueueControl(() => this.stop("closed", true));
       });
-      this.api.sidebar.onMessage("host.action", (data) => this.handleViewAction(data, "sidebar"));
-      this.api.overlay.onMessage("host.action", (data) => this.handleViewAction(data, "overlay"));
       this.ensureProgressTimer();
     }
     receiveLaunch(raw) {
@@ -6540,9 +6629,197 @@
         launch.diagnosticCorrelation = candidate.diagnosticCorrelation;
       }
       this.ensureProgressTimer();
+      this.clearChapterSkip(true);
+      this.resetChapterTracking();
+      this.pendingFinalChapterSkip = void 0;
       const sequence = ++this.replacementSequence;
       this.invalidatePendingLoads();
       this.enqueueControl(() => this.replace(launch, sequence));
+    }
+    readChapterSkipPreferences() {
+      this.chapterSkipMode = parseChapterSkipMode(
+        this.api.preferences.get(CHAPTER_SKIP_MODE_PREFERENCE_KEY)
+      );
+      this.chapterSkipTitles = parseSkipChapterTitles(
+        this.api.preferences.get(SKIP_CHAPTER_TITLES_PREFERENCE_KEY)
+      );
+    }
+    resetChapterTracking() {
+      this.observedChapterIndex = void 0;
+      this.handledChapterKey = void 0;
+      this.unavailableChapterKey = void 0;
+    }
+    currentChapterIndex() {
+      const value = this.api.mpv.getNumber("chapter");
+      return Number.isSafeInteger(value) && value >= 0 ? value : void 0;
+    }
+    currentChapterSkipTarget(chapterIndex) {
+      return chapterSkipTarget(
+        this.api.core.getChapters(),
+        chapterIndex,
+        this.api.mpv.getNumber("duration"),
+        this.api.mpv.getNumber("time-pos")
+      );
+    }
+    seekToChapterSkipTarget(target) {
+      const launch = this.launch;
+      if (target.final && launch !== void 0) {
+        this.pendingFinalChapterSkip = {
+          generation: this.session.generation,
+          positionTicks: clampPositionTicks(
+            this.positionBaseTicks + secondsToTicks(target.seconds),
+            launch.plan.runtimeTicks
+          )
+        };
+      } else {
+        this.pendingFinalChapterSkip = void 0;
+      }
+      try {
+        this.api.core.seekTo(target.seconds);
+      } catch {
+        this.pendingFinalChapterSkip = void 0;
+        this.logger.warn("player.chapter.seek-failed", {
+          chapter: target.chapterIndex,
+          final: target.final
+        });
+        this.api.core.osd("This chapter could not be skipped.");
+      }
+    }
+    reconcileChapterSkip(force = false) {
+      if (this.launch === void 0 || this.session.status !== "playing" && this.session.status !== "paused") {
+        this.clearChapterSkip(true);
+        return;
+      }
+      this.readChapterSkipPreferences();
+      this.publishChapterSkipSettings();
+      const chapterIndex = this.currentChapterIndex();
+      if (chapterIndex === void 0) {
+        this.clearChapterSkip(true);
+        this.resetChapterTracking();
+        return;
+      }
+      if (this.observedChapterIndex !== chapterIndex) {
+        this.clearChapterSkip(true);
+        this.pendingFinalChapterSkip = void 0;
+        this.observedChapterIndex = chapterIndex;
+        this.handledChapterKey = void 0;
+      }
+      if (this.chapterSkipMode === "off" || this.chapterSkipTitles.length === 0) {
+        this.clearChapterSkip(true);
+        return;
+      }
+      if (this.chapterSkipMode === "prompt" && this.upNext !== void 0) {
+        this.clearChapterSkip(false);
+        return;
+      }
+      const chapters = this.api.core.getChapters();
+      const current = chapters[chapterIndex];
+      const normalizedTitle = current?.title.trim().toLowerCase();
+      if (normalizedTitle === void 0 || !this.chapterSkipTitles.includes(normalizedTitle)) {
+        this.clearChapterSkip(true);
+        return;
+      }
+      const key = `${this.session.generation}:${chapterIndex}:${this.chapterSkipMode}`;
+      if (!force && this.handledChapterKey === key) return;
+      const target = chapterSkipTarget(
+        chapters,
+        chapterIndex,
+        this.api.mpv.getNumber("duration"),
+        this.api.mpv.getNumber("time-pos")
+      );
+      if (target === void 0) {
+        this.clearChapterSkip(true);
+        if (this.unavailableChapterKey !== key) {
+          this.unavailableChapterKey = key;
+          this.logger.info("player.chapter.skip-unavailable", {
+            correlation: this.launch.diagnosticCorrelation,
+            chapter: chapterIndex,
+            reason: "missing-safe-target"
+          });
+        }
+        return;
+      }
+      this.unavailableChapterKey = void 0;
+      this.handledChapterKey = key;
+      if (this.chapterSkipMode === "on") {
+        this.clearChapterSkip(true);
+        this.logger.info("player.chapter.auto-skip", {
+          correlation: this.launch.diagnosticCorrelation,
+          chapter: chapterIndex,
+          final: target.final
+        });
+        this.seekToChapterSkipTarget(target);
+        return;
+      }
+      this.showChapterSkipPrompt(target);
+    }
+    showChapterSkipPrompt(target) {
+      this.clearChapterSkip(false);
+      const state = {
+        generation: this.session.generation,
+        chapterIndex: target.chapterIndex,
+        title: target.title || "Chapter",
+        expiresAtMs: Date.now() + CHAPTER_SKIP_PROMPT_MS
+      };
+      this.chapterSkip = state;
+      this.logger.info("player.chapter.prompt-shown", {
+        correlation: this.launch?.diagnosticCorrelation,
+        chapter: target.chapterIndex,
+        final: target.final
+      });
+      this.publishChapterSkip();
+      if (this.overlayReady && this.upNext === void 0) this.api.overlay.show();
+      this.chapterSkipTimer = setTimeout(() => {
+        if (this.chapterSkip !== state) return;
+        this.logger.info("player.chapter.prompt-expired", {
+          correlation: this.launch?.diagnosticCorrelation,
+          chapter: state.chapterIndex
+        });
+        this.clearChapterSkip(true);
+      }, CHAPTER_SKIP_PROMPT_MS);
+    }
+    performPromptedChapterSkip(raw) {
+      const state = this.chapterSkip;
+      const generation = raw.generation;
+      const chapterIndex = raw.chapterIndex;
+      if (state === void 0 || generation !== state.generation || chapterIndex !== state.chapterIndex || generation !== this.session.generation || chapterIndex !== this.currentChapterIndex() || this.session.status !== "playing" && this.session.status !== "paused") {
+        return;
+      }
+      this.readChapterSkipPreferences();
+      const currentTitle = this.api.core.getChapters()[state.chapterIndex]?.title.trim().toLowerCase();
+      if (Date.now() >= state.expiresAtMs || this.chapterSkipMode !== "prompt" || currentTitle === void 0 || !this.chapterSkipTitles.includes(currentTitle)) {
+        this.clearChapterSkip(true);
+        return;
+      }
+      const target = this.currentChapterSkipTarget(state.chapterIndex);
+      if (target === void 0) {
+        this.clearChapterSkip(true);
+        return;
+      }
+      this.clearChapterSkip(true);
+      this.logger.info("player.chapter.user-skip", {
+        correlation: this.launch?.diagnosticCorrelation,
+        chapter: state.chapterIndex,
+        final: target.final
+      });
+      this.seekToChapterSkipTarget(target);
+    }
+    publishChapterSkip() {
+      if (!this.overlayReady) return;
+      this.api.overlay.postMessage("player.chapterSkip", this.chapterSkip ?? null);
+    }
+    publishChapterSkipSettings() {
+      const state = { mode: this.chapterSkipMode };
+      if (this.sidebarReady) this.api.sidebar.postMessage("player.chapterSkipSettings", state);
+      if (this.overlayReady) this.api.overlay.postMessage("player.chapterSkipSettings", state);
+    }
+    clearChapterSkip(hideOverlay) {
+      if (this.chapterSkipTimer !== void 0) clearTimeout(this.chapterSkipTimer);
+      this.chapterSkipTimer = void 0;
+      const hadPrompt = this.chapterSkip !== void 0;
+      this.chapterSkip = void 0;
+      if (hadPrompt) this.publishChapterSkip();
+      if (hideOverlay && this.overlayReady && this.upNext === void 0) this.api.overlay.hide();
     }
     async resolveLoad(next) {
       const original = this.api.mpv.getString("stream-open-filename");
@@ -6560,6 +6837,8 @@
           if (ownedLaunch !== void 0) {
             this.clearUpNext(true);
             this.cleanupPlaybackIfOwned(ownedLaunch, ownedGeneration);
+            this.sidebarPresented = false;
+            this.publishState();
           }
           next?.();
         }
@@ -6724,11 +7003,17 @@
         playMethod: this.launch.plan.playMethod,
         resumed: this.launch.plan.startPositionTicks > 0
       });
+      this.scheduleSidebarRecovery();
       this.publishState();
+      this.presentSidebarForManagedPlayback();
+      this.resetChapterTracking();
+      let startReport;
       if (this.startedGeneration !== generation) {
         this.startedGeneration = generation;
-        await this.sendReport("start");
+        startReport = this.sendReport("start");
       }
+      this.reconcileChapterSkip();
+      if (startReport !== void 0) await startReport;
     }
     loadExternalSubtitleTrack() {
       const path = this.externalSubtitlePath;
@@ -6771,6 +7056,8 @@
       return clampPositionTicks(this.positionBaseTicks + relative, this.launch.plan.runtimeTicks);
     }
     handleEndFile() {
+      this.clearChapterSkip(true);
+      this.resetChapterTracking();
       const acknowledge = this.pendingCoreStopAcknowledgement;
       if (acknowledge !== void 0) {
         this.pendingCoreStopAcknowledgement = void 0;
@@ -6834,6 +7121,7 @@
       this.publishState();
     }
     async periodicProgress() {
+      if (this.launch !== void 0) this.synchronizeChapterSkipPreferences();
       if (this.launch !== void 0 && (this.session.status === "preparing" || this.session.status === "paused")) {
         if (this.session.status === "paused") this.updatePosition();
         this.publishState();
@@ -6844,6 +7132,21 @@
       this.updatePosition();
       this.publishState();
       await this.sendReport("progress", "timeupdate");
+    }
+    synchronizeChapterSkipPreferences() {
+      const previousMode = this.chapterSkipMode;
+      const previousTitles = this.chapterSkipTitles.join("\0");
+      this.readChapterSkipPreferences();
+      if (previousMode === this.chapterSkipMode && previousTitles === this.chapterSkipTitles.join("\0")) {
+        return;
+      }
+      this.publishChapterSkipSettings();
+      this.handledChapterKey = void 0;
+      if (this.chapterSkipMode === "off") {
+        this.clearChapterSkip(true);
+        return;
+      }
+      this.reconcileChapterSkip(true);
     }
     async sendReport(kind, eventName) {
       const launch = this.launch;
@@ -6887,6 +7190,16 @@
       const launch = this.launch;
       this.updatePosition();
       const generation = this.session.generation;
+      const pendingFinalSkip = this.pendingFinalChapterSkip;
+      this.pendingFinalChapterSkip = void 0;
+      if (pendingFinalSkip?.generation === generation && pendingFinalSkip.positionTicks > this.session.positionTicks) {
+        this.session = reducePlaybackSession(this.session, {
+          type: "time-update",
+          generation,
+          positionTicks: pendingFinalSkip.positionTicks,
+          durationTicks: this.readDurationTicks()
+        });
+      }
       if (this.session.status === "preparing") {
         this.session = reducePlaybackSession(this.session, {
           type: "fail",
@@ -6904,7 +7217,7 @@
         return;
       }
       const duration = this.session.durationTicks;
-      const completed = duration !== void 0 && duration > 0 && this.session.positionTicks >= duration - secondsToTicks(2);
+      const completed = pendingFinalSkip?.generation === generation || duration !== void 0 && duration > 0 && this.session.positionTicks >= duration - secondsToTicks(2);
       this.session = completed ? reducePlaybackSession(this.session, {
         type: "complete",
         generation,
@@ -7067,6 +7380,9 @@
     cleanupPlaybackIfOwned(launch, generation) {
       if (this.launch !== launch || this.session.generation !== generation) return;
       try {
+        this.clearChapterSkip(true);
+        this.resetChapterTracking();
+        this.pendingFinalChapterSkip = void 0;
         this.clearMediaCredentials();
       } finally {
         this.deleteExternalSubtitle();
@@ -7092,6 +7408,9 @@
     }
     async replace(launch, sequence) {
       if (sequence !== this.replacementSequence) return;
+      this.clearChapterSkip(true);
+      this.resetChapterTracking();
+      this.pendingFinalChapterSkip = void 0;
       this.clearUpNext(true);
       const coreWasIdle = this.api.core.status.idle;
       const hadActiveMedia = this.retireForReplacement();
@@ -7215,6 +7534,7 @@
       if (item.data.SeriesName != null) next.seriesName = item.data.SeriesName;
       if (item.data.ParentIndexNumber != null) next.seasonNumber = item.data.ParentIndexNumber;
       if (item.data.IndexNumber != null) next.episodeNumber = item.data.IndexNumber;
+      this.clearChapterSkip(false);
       this.upNext = next;
       this.publishUpNext();
       if (this.overlayReady) this.api.overlay.show();
@@ -7248,23 +7568,106 @@
       if (this.sidebarReady) this.api.sidebar.postMessage("player.upNext", null);
       if (this.overlayReady) {
         this.api.overlay.postMessage("player.upNext", null);
-        if (hideOverlay) this.api.overlay.hide();
+        if (hideOverlay && this.chapterSkip === void 0) this.api.overlay.hide();
       }
     }
-    loadPlayerViews() {
+    clearSidebarRecoveryTimer() {
+      if (this.sidebarRecoveryTimer !== void 0) clearTimeout(this.sidebarRecoveryTimer);
+      this.sidebarRecoveryTimer = void 0;
+    }
+    loadSidebarView() {
+      this.sidebarReady = false;
+      this.sidebarLoadAttempt += 1;
+      this.logger.info("player.sidebar.loading", { attempt: this.sidebarLoadAttempt });
       this.api.sidebar.loadFile("dist/ui/sidebar/index.html");
-      this.sidebarReady = true;
+      this.api.sidebar.onMessage("host.action", (data) => this.handleViewAction(data, "sidebar"));
+    }
+    scheduleSidebarRecovery() {
+      this.clearSidebarRecoveryTimer();
+      this.sidebarRecoveryTimer = setTimeout(() => {
+        this.sidebarRecoveryTimer = void 0;
+        if (this.sidebarReady || this.sidebarLoadAttempt >= 2) return;
+        this.logger.warn("player.sidebar.ready-timeout", { attempt: this.sidebarLoadAttempt });
+        this.loadSidebarView();
+      }, 750);
+    }
+    loadPlayerViews() {
+      this.sidebarPresented = false;
+      this.sidebarLoadAttempt = 0;
+      this.loadSidebarView();
+      this.overlayReady = false;
       this.api.overlay.loadFile("dist/ui/overlay/index.html");
+    }
+    overlayLoaded() {
+      if (this.overlayReady) return;
+      this.api.overlay.onMessage("host.action", (data) => this.handleViewAction(data, "overlay"));
       this.api.overlay.setClickable(true);
-      this.overlayReady = true;
-      this.publishState();
+    }
+    presentSidebarForManagedPlayback() {
+      if (this.sidebarPresented || !this.sidebarReady || this.launch === void 0 || this.session.status !== "playing" && this.session.status !== "paused") {
+        return;
+      }
+      try {
+        this.api.sidebar.show();
+        this.sidebarPresented = true;
+        this.logger.info("player.sidebar.presented");
+      } catch (error) {
+        this.logger.warn("Could not present the Jellyfin player sidebar", error);
+      }
     }
     handleViewAction(raw, source) {
       if (raw === null || typeof raw !== "object") return;
       const action = raw.action;
+      const allowedActions = {
+        sidebar: /* @__PURE__ */ new Set([
+          "host.ready",
+          "host.webviewError",
+          "window.openCatalog",
+          "settings.chapterSkipMode",
+          "player.pause",
+          "player.resume"
+        ]),
+        overlay: /* @__PURE__ */ new Set([
+          "host.ready",
+          "host.webviewError",
+          "window.openCatalog",
+          "chapterSkip.skip",
+          "upNext.cancel",
+          "upNext.playNow"
+        ])
+      };
+      if (!allowedActions[source].has(action)) {
+        const view2 = source === "sidebar" ? this.api.sidebar : this.api.overlay;
+        view2.postMessage("host.response", { action, ok: false });
+        return;
+      }
       if (action === "host.ready") {
+        if (source === "sidebar") {
+          this.sidebarReady = true;
+          this.clearSidebarRecoveryTimer();
+        } else {
+          this.overlayReady = true;
+        }
+        this.logger.info("player.webview.ready", { source });
         this.publishState();
         this.publishUpNext();
+        this.publishChapterSkipSettings();
+        this.publishChapterSkip();
+        if (source === "sidebar") this.presentSidebarForManagedPlayback();
+        if (source === "overlay" && (this.chapterSkip !== void 0 || this.upNext !== void 0)) {
+          this.api.overlay.show();
+        }
+      } else if (action === "host.webviewError") {
+        const candidate = raw;
+        const kind = candidate.kind;
+        const message = candidate.message;
+        if (candidate.surface === source && (kind === "error" || kind === "unhandledrejection" || kind === "render") && typeof message === "string" && WEBVIEW_ERROR_CATEGORIES.has(message)) {
+          this.logger.error("player.webview.error", { source, kind, message });
+          if (source === "sidebar" && kind === "render" && this.sidebarLoadAttempt < 2) {
+            this.logger.warn("player.sidebar.render-retry", { attempt: this.sidebarLoadAttempt });
+            this.loadSidebarView();
+          }
+        }
       } else if (action === "window.openCatalog") {
         this.api.preferences.set(CATALOG_OPEN_REQUEST_PREFERENCE_KEY, Date.now());
         this.api.preferences.sync();
@@ -7279,6 +7682,17 @@
             this.publishUpNext();
           }
         }
+      } else if (action === "settings.chapterSkipMode") {
+        const mode = raw.mode;
+        if (mode === "on" || mode === "prompt" || mode === "off") {
+          this.api.preferences.set(CHAPTER_SKIP_MODE_PREFERENCE_KEY, mode);
+          this.api.preferences.sync();
+          this.chapterSkipMode = mode;
+          this.clearChapterSkip(true);
+          this.handledChapterKey = void 0;
+          this.publishChapterSkipSettings();
+          if (mode !== "off") this.reconcileChapterSkip(true);
+        }
       } else if (action === "player.pause") {
         this.api.core.pause();
       } else if (action === "player.resume") {
@@ -7289,6 +7703,8 @@
         const itemId = this.upNext.itemId;
         this.clearUpNext(true);
         this.api.global.postMessage(PLAYER_MESSAGES.playNext, { itemId });
+      } else if (action === "chapterSkip.skip") {
+        this.performPromptedChapterSkip(raw);
       }
       const view = source === "sidebar" ? this.api.sidebar : this.api.overlay;
       view.postMessage("host.response", { action, ok: true });

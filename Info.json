@@ -22,6 +22,8 @@
     "catalogOpenRequestAtMs": 0,
     "diagnosticLogRevealRequestAtMs": 0,
     "foregroundPollSeconds": 60,
-    "artworkCacheMaxBytes": 52428800
+    "artworkCacheMaxBytes": 52428800,
+    "chapterSkipMode": "prompt",
+    "skipChapterTitles": "Opening,Intro,Introduction,Opening Credits,Opening Theme,Main Title,Title Sequence,Theme,Theme Song,OP,Ending,Outro,Credits,End Credits,Closing Credits,Final Credits,Credit Roll,Closing Theme,ED"
   }
 }

@@ -7,6 +7,7 @@ export const BRIDGE_REQUEST_MESSAGE = 'bridge.request';
 export const BRIDGE_RESPONSE_MESSAGE = 'bridge.response';
 export const DEFAULT_PROGRESS_INTERVAL_MS = 10_000;
 export const DEFAULT_ARTWORK_LIMIT_BYTES = 8 * 1024 * 1024;
+export const SKIP_CHAPTER_TITLES_PREFERENCE_KEY = 'skipChapterTitles';
 
 export const PLAYER_MESSAGES = {
   catalogOpen: 'jellyfin.catalog.open',

@@ -1,11 +1,16 @@
 export type PlayerUiAction =
   | 'host.ready'
+  | 'host.webviewError'
   | 'window.openCatalog'
   | 'settings.autoplay'
+  | 'settings.chapterSkipMode'
   | 'player.pause'
   | 'player.resume'
+  | 'chapterSkip.skip'
   | 'upNext.playNow'
   | 'upNext.cancel';
+
+export type ChapterSkipMode = 'on' | 'prompt' | 'off';
 
 export interface PlayerViewState {
   generation: number;
@@ -31,6 +36,17 @@ export interface UpNextViewState {
   artwork?: string;
 }
 
+export interface ChapterSkipViewState {
+  generation: number;
+  chapterIndex: number;
+  title: string;
+  expiresAtMs: number;
+}
+
+export interface ChapterSkipSettingsState {
+  mode: ChapterSkipMode;
+}
+
 export interface PlayerUiMessage {
   action: PlayerUiAction;
   payload: Record<string, unknown>;
@@ -40,8 +56,59 @@ export interface PlayerUiHost {
   send(action: PlayerUiAction, payload?: Record<string, unknown>): Promise<void>;
   getPlayerState(): PlayerViewState | undefined;
   getUpNext(): UpNextViewState | undefined;
+  getChapterSkip(): ChapterSkipViewState | undefined;
+  getChapterSkipSettings(): ChapterSkipSettingsState;
   subscribePlayerState(listener: (state: PlayerViewState) => void): () => void;
   subscribeUpNext(listener: (state: UpNextViewState | undefined) => void): () => void;
+  subscribeChapterSkip(listener: (state: ChapterSkipViewState | undefined) => void): () => void;
+  subscribeChapterSkipSettings(listener: (state: ChapterSkipSettingsState) => void): () => void;
+}
+
+export type PlayerWebviewSurface = 'sidebar' | 'overlay';
+export type PlayerWebviewErrorKind = 'error' | 'unhandledrejection' | 'render';
+
+const WEBVIEW_ERROR_NAMES = new Set([
+  'Error',
+  'TypeError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'URIError',
+  'EvalError',
+  'AggregateError',
+  'DOMException',
+]);
+
+function describeWebviewError(value: unknown): string {
+  // Exception messages may contain a media URL, Jellyfin metadata, or another
+  // user-controlled value. Preserve only a conventional error class so the
+  // diagnostic log remains useful without copying webview content into it.
+  if (value instanceof Error) {
+    return WEBVIEW_ERROR_NAMES.has(value.name) ? value.name : 'Error';
+  }
+  return value === null ? 'NonError:null' : `NonError:${typeof value}`;
+}
+
+export function reportPlayerWebviewError(
+  surface: PlayerWebviewSurface,
+  kind: PlayerWebviewErrorKind,
+  value: unknown,
+): void {
+  window.iina?.postMessage('host.action', {
+    action: 'host.webviewError',
+    surface,
+    kind,
+    message: describeWebviewError(value),
+  });
+}
+
+export function installPlayerWebviewErrorReporting(surface: PlayerWebviewSurface): void {
+  window.addEventListener('error', (event) => {
+    reportPlayerWebviewError(surface, 'error', event.error ?? event.message);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    reportPlayerWebviewError(surface, 'unhandledrejection', event.reason);
+  });
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -52,6 +119,10 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function safeNonnegativeNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function safeNonnegativeInteger(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : undefined;
 }
 
 function safeText(value: unknown): string | undefined {
@@ -133,11 +204,43 @@ export function parseUpNext(value: unknown): UpNextViewState | undefined {
   return parsed;
 }
 
+export function parseChapterSkip(value: unknown): ChapterSkipViewState | undefined {
+  const candidate = record(value);
+  const generation = safeNonnegativeInteger(candidate?.generation);
+  const chapterIndex = safeNonnegativeInteger(candidate?.chapterIndex);
+  const title = safeText(candidate?.title);
+  const expiresAtMs = safeNonnegativeNumber(candidate?.expiresAtMs);
+  if (
+    candidate === undefined ||
+    generation === undefined ||
+    chapterIndex === undefined ||
+    title === undefined ||
+    title.length > 128 ||
+    expiresAtMs === undefined
+  ) {
+    return undefined;
+  }
+  return { generation, chapterIndex, title, expiresAtMs };
+}
+
+export function parseChapterSkipSettings(value: unknown): ChapterSkipSettingsState | undefined {
+  const mode = record(value)?.mode;
+  return mode === 'on' || mode === 'prompt' || mode === 'off' ? { mode } : undefined;
+}
+
 class NativePlayerUiHost implements PlayerUiHost {
   private playerState: PlayerViewState | undefined;
   private upNext: UpNextViewState | undefined;
+  private chapterSkip: ChapterSkipViewState | undefined;
+  private chapterSkipSettings: ChapterSkipSettingsState = { mode: 'prompt' };
   private readonly stateListeners = new Set<(state: PlayerViewState) => void>();
   private readonly upNextListeners = new Set<(state: UpNextViewState | undefined) => void>();
+  private readonly chapterSkipListeners = new Set<
+    (state: ChapterSkipViewState | undefined) => void
+  >();
+  private readonly chapterSkipSettingsListeners = new Set<
+    (state: ChapterSkipSettingsState) => void
+  >();
 
   constructor() {
     window.iina?.onMessage('player.state', (value) => {
@@ -152,7 +255,23 @@ class NativePlayerUiHost implements PlayerUiHost {
       this.upNext = state;
       for (const listener of this.upNextListeners) listener(state);
     });
+    window.iina?.onMessage('player.chapterSkip', (value) => {
+      const state = value === null ? undefined : parseChapterSkip(value);
+      if (value !== null && state === undefined) return;
+      this.chapterSkip = state;
+      for (const listener of this.chapterSkipListeners) listener(state);
+    });
+    window.iina?.onMessage('player.chapterSkipSettings', (value) => {
+      const state = parseChapterSkipSettings(value);
+      if (state === undefined) return;
+      this.chapterSkipSettings = state;
+      for (const listener of this.chapterSkipSettingsListeners) listener(state);
+    });
     void this.send('host.ready');
+    // IINA installs the native overlay listener from its didFinish callback,
+    // after this document's first script turn can already have completed.
+    // Repeat the idempotent handshake once so the overlay cannot miss it.
+    window.setTimeout(() => void this.send('host.ready'), 250);
   }
 
   async send(action: PlayerUiAction, payload: Record<string, unknown> = {}): Promise<void> {
@@ -167,6 +286,14 @@ class NativePlayerUiHost implements PlayerUiHost {
     return this.upNext;
   }
 
+  getChapterSkip(): ChapterSkipViewState | undefined {
+    return this.chapterSkip;
+  }
+
+  getChapterSkipSettings(): ChapterSkipSettingsState {
+    return this.chapterSkipSettings;
+  }
+
   subscribePlayerState(listener: (state: PlayerViewState) => void): () => void {
     this.stateListeners.add(listener);
     return () => this.stateListeners.delete(listener);
@@ -175,6 +302,16 @@ class NativePlayerUiHost implements PlayerUiHost {
   subscribeUpNext(listener: (state: UpNextViewState | undefined) => void): () => void {
     this.upNextListeners.add(listener);
     return () => this.upNextListeners.delete(listener);
+  }
+
+  subscribeChapterSkip(listener: (state: ChapterSkipViewState | undefined) => void): () => void {
+    this.chapterSkipListeners.add(listener);
+    return () => this.chapterSkipListeners.delete(listener);
+  }
+
+  subscribeChapterSkipSettings(listener: (state: ChapterSkipSettingsState) => void): () => void {
+    this.chapterSkipSettingsListeners.add(listener);
+    return () => this.chapterSkipSettingsListeners.delete(listener);
   }
 }
 
@@ -206,12 +343,29 @@ export class MockPlayerUiHost implements PlayerUiHost {
   readonly messages: PlayerUiMessage[] = [];
   private playerState: PlayerViewState | undefined;
   private upNext: UpNextViewState | undefined;
+  private chapterSkip: ChapterSkipViewState | undefined;
+  private chapterSkipSettings: ChapterSkipSettingsState;
   private readonly stateListeners = new Set<(state: PlayerViewState) => void>();
   private readonly upNextListeners = new Set<(state: UpNextViewState | undefined) => void>();
+  private readonly chapterSkipListeners = new Set<
+    (state: ChapterSkipViewState | undefined) => void
+  >();
+  private readonly chapterSkipSettingsListeners = new Set<
+    (state: ChapterSkipSettingsState) => void
+  >();
 
-  constructor(options: { playerState?: PlayerViewState; upNext?: UpNextViewState } = {}) {
+  constructor(
+    options: {
+      playerState?: PlayerViewState;
+      upNext?: UpNextViewState;
+      chapterSkip?: ChapterSkipViewState;
+      chapterSkipSettings?: ChapterSkipSettingsState;
+    } = {},
+  ) {
     this.playerState = options.playerState ?? demoPlayerState;
-    this.upNext = options.upNext ?? demoUpNext;
+    this.upNext = 'upNext' in options ? options.upNext : demoUpNext;
+    this.chapterSkip = options.chapterSkip;
+    this.chapterSkipSettings = options.chapterSkipSettings ?? { mode: 'prompt' };
   }
 
   async send(action: PlayerUiAction, payload: Record<string, unknown> = {}): Promise<void> {
@@ -226,6 +380,14 @@ export class MockPlayerUiHost implements PlayerUiHost {
     return this.upNext;
   }
 
+  getChapterSkip(): ChapterSkipViewState | undefined {
+    return this.chapterSkip;
+  }
+
+  getChapterSkipSettings(): ChapterSkipSettingsState {
+    return this.chapterSkipSettings;
+  }
+
   subscribePlayerState(listener: (state: PlayerViewState) => void): () => void {
     this.stateListeners.add(listener);
     return () => this.stateListeners.delete(listener);
@@ -236,6 +398,16 @@ export class MockPlayerUiHost implements PlayerUiHost {
     return () => this.upNextListeners.delete(listener);
   }
 
+  subscribeChapterSkip(listener: (state: ChapterSkipViewState | undefined) => void): () => void {
+    this.chapterSkipListeners.add(listener);
+    return () => this.chapterSkipListeners.delete(listener);
+  }
+
+  subscribeChapterSkipSettings(listener: (state: ChapterSkipSettingsState) => void): () => void {
+    this.chapterSkipSettingsListeners.add(listener);
+    return () => this.chapterSkipSettingsListeners.delete(listener);
+  }
+
   emitPlayerState(state: PlayerViewState): void {
     this.playerState = state;
     for (const listener of this.stateListeners) listener(state);
@@ -244,6 +416,16 @@ export class MockPlayerUiHost implements PlayerUiHost {
   emitUpNext(state: UpNextViewState | undefined): void {
     this.upNext = state;
     for (const listener of this.upNextListeners) listener(state);
+  }
+
+  emitChapterSkip(state: ChapterSkipViewState | undefined): void {
+    this.chapterSkip = state;
+    for (const listener of this.chapterSkipListeners) listener(state);
+  }
+
+  emitChapterSkipSettings(state: ChapterSkipSettingsState): void {
+    this.chapterSkipSettings = state;
+    for (const listener of this.chapterSkipSettingsListeners) listener(state);
   }
 }
 

@@ -1,6 +1,7 @@
 import {
   BaseItemSchema,
   CATALOG_OPEN_REQUEST_PREFERENCE_KEY,
+  CHAPTER_SKIP_MODE_PREFERENCE_KEY,
   PlaybackPlanSchema,
   beginPlaybackSession,
   buildPlaybackReportRequest,
@@ -15,7 +16,11 @@ import {
   type PlaybackSessionState,
   type PublicPlaybackState,
 } from '@iina-jellyfin/core';
-import { DEFAULT_PROGRESS_INTERVAL_MS, PLAYER_MESSAGES } from './constants';
+import {
+  DEFAULT_PROGRESS_INTERVAL_MS,
+  PLAYER_MESSAGES,
+  SKIP_CHAPTER_TITLES_PREFERENCE_KEY,
+} from './constants';
 import type { IinaHttpTransport } from './iina-http';
 import type { PlayerLaunch } from './player-messages';
 import { writePlaybackState } from './playback-state-mailbox';
@@ -43,6 +48,53 @@ class StalePlayerLoadError extends Error {
 
 const MAX_EXTERNAL_SUBTITLE_BYTES = 10 * 1024 * 1024;
 const CORE_STOP_ACK_TIMEOUT_MS = 750;
+const CHAPTER_SKIP_PROMPT_MS = 10_000;
+const FINAL_CHAPTER_END_OFFSET_SECONDS = 1;
+const CHAPTER_SKIP_FORWARD_EPSILON_SECONDS = 0.05;
+const MAX_CHAPTER_SKIP_TITLES = 32;
+const MAX_CHAPTER_TITLE_LENGTH = 128;
+const MAX_CHAPTER_SKIP_PREFERENCE_LENGTH = 4_096;
+const WEBVIEW_ERROR_CATEGORIES = new Set([
+  'Error',
+  'TypeError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'URIError',
+  'EvalError',
+  'AggregateError',
+  'DOMException',
+  'NonError:null',
+  'NonError:string',
+  'NonError:number',
+  'NonError:boolean',
+  'NonError:undefined',
+  'NonError:object',
+  'NonError:symbol',
+  'NonError:bigint',
+  'NonError:function',
+]);
+
+export type ChapterSkipMode = 'on' | 'prompt' | 'off';
+
+interface ChapterSkipState {
+  generation: number;
+  chapterIndex: number;
+  title: string;
+  expiresAtMs: number;
+}
+
+interface ChapterSkipTarget {
+  chapterIndex: number;
+  title: string;
+  seconds: number;
+  final: boolean;
+}
+
+interface PendingFinalChapterSkip {
+  generation: number;
+  positionTicks: number;
+}
 
 interface UpNextState {
   itemId: string;
@@ -91,6 +143,70 @@ function localStartPositionSeconds(plan: PlayerLaunch['plan']): number {
   return ticksToSeconds(Math.max(0, plan.startPositionTicks - serverStartOffset));
 }
 
+function parseChapterSkipMode(value: unknown): ChapterSkipMode {
+  return value === 'on' || value === 'prompt' || value === 'off' ? value : 'prompt';
+}
+
+function parseSkipChapterTitles(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  return [
+    ...new Set(
+      value
+        .slice(0, MAX_CHAPTER_SKIP_PREFERENCE_LENGTH)
+        .split(',')
+        .map((title) => title.trim().slice(0, MAX_CHAPTER_TITLE_LENGTH).toLowerCase())
+        .filter((title) => title.length > 0),
+    ),
+  ].slice(0, MAX_CHAPTER_SKIP_TITLES);
+}
+
+function chapterSkipTarget(
+  chapters: IINA.Chapter[],
+  chapterIndex: number,
+  durationSeconds: number,
+  currentPositionSeconds?: number,
+): ChapterSkipTarget | undefined {
+  if (!Number.isSafeInteger(chapterIndex) || chapterIndex < 0) return undefined;
+  const current = chapters[chapterIndex];
+  if (current === undefined || !Number.isFinite(current.start) || current.start < 0)
+    return undefined;
+  const next = chapters[chapterIndex + 1];
+  if (next !== undefined) {
+    if (!Number.isFinite(next.start) || next.start <= current.start) return undefined;
+    if (
+      currentPositionSeconds !== undefined &&
+      Number.isFinite(currentPositionSeconds) &&
+      next.start <= currentPositionSeconds + CHAPTER_SKIP_FORWARD_EPSILON_SECONDS
+    ) {
+      return undefined;
+    }
+    return {
+      chapterIndex,
+      title: current.title.trim().slice(0, MAX_CHAPTER_TITLE_LENGTH),
+      seconds: next.start,
+      final: false,
+    };
+  }
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= FINAL_CHAPTER_END_OFFSET_SECONDS) {
+    return undefined;
+  }
+  const seconds = durationSeconds - FINAL_CHAPTER_END_OFFSET_SECONDS;
+  if (seconds <= current.start) return undefined;
+  if (
+    currentPositionSeconds !== undefined &&
+    Number.isFinite(currentPositionSeconds) &&
+    seconds <= currentPositionSeconds + CHAPTER_SKIP_FORWARD_EPSILON_SECONDS
+  ) {
+    return undefined;
+  }
+  return {
+    chapterIndex,
+    title: current.title.trim().slice(0, MAX_CHAPTER_TITLE_LENGTH),
+    seconds,
+    final: true,
+  };
+}
+
 function mediaTitle(display: PlayerLaunch['display']): string {
   if (
     display.seriesName !== undefined &&
@@ -113,7 +229,10 @@ export class PlayerRuntime {
   private positionBaseTicks = 0;
   private progressTimer: ReturnType<typeof setInterval> | undefined;
   private sidebarReady = false;
+  private sidebarPresented = false;
   private overlayReady = false;
+  private sidebarLoadAttempt = 0;
+  private sidebarRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private upNext: UpNextState | undefined;
   private upNextTimer: ReturnType<typeof setInterval> | undefined;
   private externalSubtitlePath: string | undefined;
@@ -127,6 +246,14 @@ export class PlayerRuntime {
   private playbackStateSequence = 0;
   private playbackStartedAtMs = 0;
   private playbackStatePersistenceFailed = false;
+  private chapterSkipMode: ChapterSkipMode = 'prompt';
+  private chapterSkipTitles: string[] = [];
+  private chapterSkip: ChapterSkipState | undefined;
+  private chapterSkipTimer: ReturnType<typeof setTimeout> | undefined;
+  private observedChapterIndex: number | undefined;
+  private handledChapterKey: string | undefined;
+  private unavailableChapterKey: string | undefined;
+  private pendingFinalChapterSkip: PendingFinalChapterSkip | undefined;
 
   constructor(
     private readonly api: PlayerApi,
@@ -135,6 +262,7 @@ export class PlayerRuntime {
   ) {}
 
   install(): void {
+    this.readChapterSkipPreferences();
     this.api.global.onMessage(PLAYER_MESSAGES.launch, (raw) => this.receiveLaunch(raw));
     this.api.global.onMessage(PLAYER_MESSAGES.stop, (raw) => {
       const requested = (raw as { reason?: unknown }).reason;
@@ -151,24 +279,28 @@ export class PlayerRuntime {
     });
 
     this.api.event.on('iina.window-loaded', () => this.loadPlayerViews());
+    this.api.event.on('iina.plugin-overlay-loaded', () => this.overlayLoaded());
     this.api.event.on('iina.file-loaded', () => void this.mediaLoaded());
     this.api.event.on('mpv.pause.changed', () => void this.pauseChanged());
     this.api.event.on('mpv.speed.changed', () => this.playbackTimingChanged());
     this.api.event.on('mpv.paused-for-cache.changed', () => this.playbackTimingChanged());
+    this.api.event.on('mpv.chapter.changed', () => this.reconcileChapterSkip());
+    this.api.event.on('mpv.duration.changed', () => this.reconcileChapterSkip());
     this.api.event.on('mpv.seek', () => void this.reportImmediate('seek'));
     this.api.event.on('mpv.end-file', () => {
       this.handleEndFile();
     });
     this.api.event.on('iina.window-will-close', () => {
       this.clearProgressTimer();
+      this.clearSidebarRecoveryTimer();
+      this.clearChapterSkip(true);
+      this.resetChapterTracking();
+      this.pendingFinalChapterSkip = undefined;
       this.replacementSequence += 1;
       this.discardPendingHandoffs();
       this.invalidatePendingLoads();
       this.enqueueControl(() => this.stop('closed', true));
     });
-
-    this.api.sidebar.onMessage('host.action', (data) => this.handleViewAction(data, 'sidebar'));
-    this.api.overlay.onMessage('host.action', (data) => this.handleViewAction(data, 'overlay'));
 
     this.ensureProgressTimer();
   }
@@ -201,9 +333,232 @@ export class PlayerRuntime {
     // A later launch reuses the same main entry, so restart the timer stopped by
     // window-will-close instead of assuming install() will run again.
     this.ensureProgressTimer();
+    this.clearChapterSkip(true);
+    this.resetChapterTracking();
+    this.pendingFinalChapterSkip = undefined;
     const sequence = ++this.replacementSequence;
     this.invalidatePendingLoads();
     this.enqueueControl(() => this.replace(launch, sequence));
+  }
+
+  private readChapterSkipPreferences(): void {
+    this.chapterSkipMode = parseChapterSkipMode(
+      this.api.preferences.get(CHAPTER_SKIP_MODE_PREFERENCE_KEY),
+    );
+    this.chapterSkipTitles = parseSkipChapterTitles(
+      this.api.preferences.get(SKIP_CHAPTER_TITLES_PREFERENCE_KEY),
+    );
+  }
+
+  private resetChapterTracking(): void {
+    this.observedChapterIndex = undefined;
+    this.handledChapterKey = undefined;
+    this.unavailableChapterKey = undefined;
+  }
+
+  private currentChapterIndex(): number | undefined {
+    const value = this.api.mpv.getNumber('chapter');
+    return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  }
+
+  private currentChapterSkipTarget(chapterIndex: number): ChapterSkipTarget | undefined {
+    return chapterSkipTarget(
+      this.api.core.getChapters(),
+      chapterIndex,
+      this.api.mpv.getNumber('duration'),
+      this.api.mpv.getNumber('time-pos'),
+    );
+  }
+
+  private seekToChapterSkipTarget(target: ChapterSkipTarget): void {
+    const launch = this.launch;
+    if (target.final && launch !== undefined) {
+      this.pendingFinalChapterSkip = {
+        generation: this.session.generation,
+        positionTicks: clampPositionTicks(
+          this.positionBaseTicks + secondsToTicks(target.seconds),
+          launch.plan.runtimeTicks,
+        ),
+      };
+    } else {
+      this.pendingFinalChapterSkip = undefined;
+    }
+    try {
+      this.api.core.seekTo(target.seconds);
+    } catch {
+      this.pendingFinalChapterSkip = undefined;
+      this.logger.warn('player.chapter.seek-failed', {
+        chapter: target.chapterIndex,
+        final: target.final,
+      });
+      this.api.core.osd('This chapter could not be skipped.');
+    }
+  }
+
+  private reconcileChapterSkip(force = false): void {
+    if (
+      this.launch === undefined ||
+      (this.session.status !== 'playing' && this.session.status !== 'paused')
+    ) {
+      this.clearChapterSkip(true);
+      return;
+    }
+
+    this.readChapterSkipPreferences();
+    this.publishChapterSkipSettings();
+    const chapterIndex = this.currentChapterIndex();
+    if (chapterIndex === undefined) {
+      this.clearChapterSkip(true);
+      this.resetChapterTracking();
+      return;
+    }
+    if (this.observedChapterIndex !== chapterIndex) {
+      this.clearChapterSkip(true);
+      this.pendingFinalChapterSkip = undefined;
+      this.observedChapterIndex = chapterIndex;
+      this.handledChapterKey = undefined;
+    }
+
+    if (this.chapterSkipMode === 'off' || this.chapterSkipTitles.length === 0) {
+      this.clearChapterSkip(true);
+      return;
+    }
+    if (this.chapterSkipMode === 'prompt' && this.upNext !== undefined) {
+      this.clearChapterSkip(false);
+      return;
+    }
+
+    const chapters = this.api.core.getChapters();
+    const current = chapters[chapterIndex];
+    const normalizedTitle = current?.title.trim().toLowerCase();
+    if (normalizedTitle === undefined || !this.chapterSkipTitles.includes(normalizedTitle)) {
+      this.clearChapterSkip(true);
+      return;
+    }
+
+    const key = `${this.session.generation}:${chapterIndex}:${this.chapterSkipMode}`;
+    if (!force && this.handledChapterKey === key) return;
+    const target = chapterSkipTarget(
+      chapters,
+      chapterIndex,
+      this.api.mpv.getNumber('duration'),
+      this.api.mpv.getNumber('time-pos'),
+    );
+    if (target === undefined) {
+      this.clearChapterSkip(true);
+      if (this.unavailableChapterKey !== key) {
+        this.unavailableChapterKey = key;
+        this.logger.info('player.chapter.skip-unavailable', {
+          correlation: this.launch.diagnosticCorrelation,
+          chapter: chapterIndex,
+          reason: 'missing-safe-target',
+        });
+      }
+      return;
+    }
+
+    this.unavailableChapterKey = undefined;
+    this.handledChapterKey = key;
+    if (this.chapterSkipMode === 'on') {
+      this.clearChapterSkip(true);
+      this.logger.info('player.chapter.auto-skip', {
+        correlation: this.launch.diagnosticCorrelation,
+        chapter: chapterIndex,
+        final: target.final,
+      });
+      this.seekToChapterSkipTarget(target);
+      return;
+    }
+
+    this.showChapterSkipPrompt(target);
+  }
+
+  private showChapterSkipPrompt(target: ChapterSkipTarget): void {
+    this.clearChapterSkip(false);
+    const state: ChapterSkipState = {
+      generation: this.session.generation,
+      chapterIndex: target.chapterIndex,
+      title: target.title || 'Chapter',
+      expiresAtMs: Date.now() + CHAPTER_SKIP_PROMPT_MS,
+    };
+    this.chapterSkip = state;
+    this.logger.info('player.chapter.prompt-shown', {
+      correlation: this.launch?.diagnosticCorrelation,
+      chapter: target.chapterIndex,
+      final: target.final,
+    });
+    this.publishChapterSkip();
+    if (this.overlayReady && this.upNext === undefined) this.api.overlay.show();
+    this.chapterSkipTimer = setTimeout(() => {
+      if (this.chapterSkip !== state) return;
+      this.logger.info('player.chapter.prompt-expired', {
+        correlation: this.launch?.diagnosticCorrelation,
+        chapter: state.chapterIndex,
+      });
+      this.clearChapterSkip(true);
+    }, CHAPTER_SKIP_PROMPT_MS);
+  }
+
+  private performPromptedChapterSkip(raw: Record<string, unknown>): void {
+    const state = this.chapterSkip;
+    const generation = raw.generation;
+    const chapterIndex = raw.chapterIndex;
+    if (
+      state === undefined ||
+      generation !== state.generation ||
+      chapterIndex !== state.chapterIndex ||
+      generation !== this.session.generation ||
+      chapterIndex !== this.currentChapterIndex() ||
+      (this.session.status !== 'playing' && this.session.status !== 'paused')
+    ) {
+      return;
+    }
+    this.readChapterSkipPreferences();
+    const currentTitle = this.api.core
+      .getChapters()
+      [state.chapterIndex]?.title.trim()
+      .toLowerCase();
+    if (
+      Date.now() >= state.expiresAtMs ||
+      this.chapterSkipMode !== 'prompt' ||
+      currentTitle === undefined ||
+      !this.chapterSkipTitles.includes(currentTitle)
+    ) {
+      this.clearChapterSkip(true);
+      return;
+    }
+    const target = this.currentChapterSkipTarget(state.chapterIndex);
+    if (target === undefined) {
+      this.clearChapterSkip(true);
+      return;
+    }
+    this.clearChapterSkip(true);
+    this.logger.info('player.chapter.user-skip', {
+      correlation: this.launch?.diagnosticCorrelation,
+      chapter: state.chapterIndex,
+      final: target.final,
+    });
+    this.seekToChapterSkipTarget(target);
+  }
+
+  private publishChapterSkip(): void {
+    if (!this.overlayReady) return;
+    this.api.overlay.postMessage('player.chapterSkip', this.chapterSkip ?? null);
+  }
+
+  private publishChapterSkipSettings(): void {
+    const state = { mode: this.chapterSkipMode };
+    if (this.sidebarReady) this.api.sidebar.postMessage('player.chapterSkipSettings', state);
+    if (this.overlayReady) this.api.overlay.postMessage('player.chapterSkipSettings', state);
+  }
+
+  private clearChapterSkip(hideOverlay: boolean): void {
+    if (this.chapterSkipTimer !== undefined) clearTimeout(this.chapterSkipTimer);
+    this.chapterSkipTimer = undefined;
+    const hadPrompt = this.chapterSkip !== undefined;
+    this.chapterSkip = undefined;
+    if (hadPrompt) this.publishChapterSkip();
+    if (hideOverlay && this.overlayReady && this.upNext === undefined) this.api.overlay.hide();
   }
 
   private async resolveLoad(next?: () => void): Promise<void> {
@@ -224,6 +579,10 @@ export class PlayerRuntime {
         if (ownedLaunch !== undefined) {
           this.clearUpNext(true);
           this.cleanupPlaybackIfOwned(ownedLaunch, ownedGeneration);
+          this.sidebarPresented = false;
+          // Keep the plugin tab selected if the user leaves it open, but remove
+          // Jellyfin metadata and allow a later managed launch to present it.
+          this.publishState();
         }
         next?.();
       }
@@ -421,13 +780,21 @@ export class PlayerRuntime {
       playMethod: this.launch.plan.playMethod,
       resumed: this.launch.plan.startPositionTicks > 0,
     });
+    this.scheduleSidebarRecovery();
     // The catalog and player views should reflect native playback immediately;
     // Jellyfin reporting remains serialized but must not delay local UI state.
     this.publishState();
+    this.presentSidebarForManagedPlayback();
+    this.resetChapterTracking();
+    let startReport: Promise<void> | undefined;
     if (this.startedGeneration !== generation) {
       this.startedGeneration = generation;
-      await this.sendReport('start');
+      startReport = this.sendReport('start');
     }
+    // Enqueue the start report before chapter skipping can synchronously produce
+    // seek/progress or end-file callbacks for a very short opening/ending.
+    this.reconcileChapterSkip();
+    if (startReport !== undefined) await startReport;
   }
 
   private loadExternalSubtitleTrack(): void {
@@ -476,6 +843,8 @@ export class PlayerRuntime {
   }
 
   private handleEndFile(): void {
+    this.clearChapterSkip(true);
+    this.resetChapterTracking();
     const acknowledge = this.pendingCoreStopAcknowledgement;
     if (acknowledge !== undefined) {
       this.pendingCoreStopAcknowledgement = undefined;
@@ -554,6 +923,7 @@ export class PlayerRuntime {
   }
 
   private async periodicProgress(): Promise<void> {
+    if (this.launch !== undefined) this.synchronizeChapterSkipPreferences();
     if (
       this.launch !== undefined &&
       (this.session.status === 'preparing' || this.session.status === 'paused')
@@ -569,6 +939,25 @@ export class PlayerRuntime {
     this.updatePosition();
     this.publishState();
     await this.sendReport('progress', 'timeupdate');
+  }
+
+  private synchronizeChapterSkipPreferences(): void {
+    const previousMode = this.chapterSkipMode;
+    const previousTitles = this.chapterSkipTitles.join('\u0000');
+    this.readChapterSkipPreferences();
+    if (
+      previousMode === this.chapterSkipMode &&
+      previousTitles === this.chapterSkipTitles.join('\u0000')
+    ) {
+      return;
+    }
+    this.publishChapterSkipSettings();
+    this.handledChapterKey = undefined;
+    if (this.chapterSkipMode === 'off') {
+      this.clearChapterSkip(true);
+      return;
+    }
+    this.reconcileChapterSkip(true);
   }
 
   private async sendReport(
@@ -622,6 +1011,19 @@ export class PlayerRuntime {
     const launch = this.launch;
     this.updatePosition();
     const generation = this.session.generation;
+    const pendingFinalSkip = this.pendingFinalChapterSkip;
+    this.pendingFinalChapterSkip = undefined;
+    if (
+      pendingFinalSkip?.generation === generation &&
+      pendingFinalSkip.positionTicks > this.session.positionTicks
+    ) {
+      this.session = reducePlaybackSession(this.session, {
+        type: 'time-update',
+        generation,
+        positionTicks: pendingFinalSkip.positionTicks,
+        durationTicks: this.readDurationTicks(),
+      });
+    }
     if (this.session.status === 'preparing') {
       this.session = reducePlaybackSession(this.session, {
         type: 'fail',
@@ -640,9 +1042,10 @@ export class PlayerRuntime {
     }
     const duration = this.session.durationTicks;
     const completed =
-      duration !== undefined &&
-      duration > 0 &&
-      this.session.positionTicks >= duration - secondsToTicks(2);
+      pendingFinalSkip?.generation === generation ||
+      (duration !== undefined &&
+        duration > 0 &&
+        this.session.positionTicks >= duration - secondsToTicks(2));
     this.session = completed
       ? reducePlaybackSession(this.session, {
           type: 'complete',
@@ -831,6 +1234,9 @@ export class PlayerRuntime {
   private cleanupPlaybackIfOwned(launch: PlayerLaunch, generation: number): void {
     if (this.launch !== launch || this.session.generation !== generation) return;
     try {
+      this.clearChapterSkip(true);
+      this.resetChapterTracking();
+      this.pendingFinalChapterSkip = undefined;
       this.clearMediaCredentials();
     } finally {
       this.deleteExternalSubtitle();
@@ -858,6 +1264,9 @@ export class PlayerRuntime {
 
   private async replace(launch: PlayerLaunch, sequence: number): Promise<void> {
     if (sequence !== this.replacementSequence) return;
+    this.clearChapterSkip(true);
+    this.resetChapterTracking();
+    this.pendingFinalChapterSkip = undefined;
     this.clearUpNext(true);
     const coreWasIdle = this.api.core.status.idle;
     const hadActiveMedia = this.retireForReplacement();
@@ -1000,6 +1409,7 @@ export class PlayerRuntime {
     if (item.data.SeriesName != null) next.seriesName = item.data.SeriesName;
     if (item.data.ParentIndexNumber != null) next.seasonNumber = item.data.ParentIndexNumber;
     if (item.data.IndexNumber != null) next.episodeNumber = item.data.IndexNumber;
+    this.clearChapterSkip(false);
     this.upNext = next;
     this.publishUpNext();
     if (this.overlayReady) this.api.overlay.show();
@@ -1037,25 +1447,131 @@ export class PlayerRuntime {
     if (this.sidebarReady) this.api.sidebar.postMessage('player.upNext', null);
     if (this.overlayReady) {
       this.api.overlay.postMessage('player.upNext', null);
-      if (hideOverlay) this.api.overlay.hide();
+      if (hideOverlay && this.chapterSkip === undefined) this.api.overlay.hide();
     }
   }
 
-  private loadPlayerViews(): void {
+  private clearSidebarRecoveryTimer(): void {
+    if (this.sidebarRecoveryTimer !== undefined) clearTimeout(this.sidebarRecoveryTimer);
+    this.sidebarRecoveryTimer = undefined;
+  }
+
+  private loadSidebarView(): void {
+    this.sidebarReady = false;
+    this.sidebarLoadAttempt += 1;
+    this.logger.info('player.sidebar.loading', { attempt: this.sidebarLoadAttempt });
     this.api.sidebar.loadFile('dist/ui/sidebar/index.html');
-    this.sidebarReady = true;
+    // IINA clears the sidebar message hub in loadFile(), so register actions
+    // only after initiating the new page load.
+    this.api.sidebar.onMessage('host.action', (data) => this.handleViewAction(data, 'sidebar'));
+  }
+
+  private scheduleSidebarRecovery(): void {
+    this.clearSidebarRecoveryTimer();
+    this.sidebarRecoveryTimer = setTimeout(() => {
+      this.sidebarRecoveryTimer = undefined;
+      if (this.sidebarReady || this.sidebarLoadAttempt >= 2) return;
+      this.logger.warn('player.sidebar.ready-timeout', { attempt: this.sidebarLoadAttempt });
+      this.loadSidebarView();
+    }, 750);
+  }
+
+  private loadPlayerViews(): void {
+    this.sidebarPresented = false;
+    this.sidebarLoadAttempt = 0;
+    this.loadSidebarView();
+    this.overlayReady = false;
     this.api.overlay.loadFile('dist/ui/overlay/index.html');
+  }
+
+  private overlayLoaded(): void {
+    if (this.overlayReady) return;
+    // overlay.onMessage() is ignored until IINA marks the webview loaded, and
+    // overlay.loadFile() clears prior listeners. The loaded event is therefore
+    // the first reliable point to install the action bridge.
+    this.api.overlay.onMessage('host.action', (data) => this.handleViewAction(data, 'overlay'));
     this.api.overlay.setClickable(true);
-    this.overlayReady = true;
-    this.publishState();
+  }
+
+  private presentSidebarForManagedPlayback(): void {
+    if (
+      this.sidebarPresented ||
+      !this.sidebarReady ||
+      this.launch === undefined ||
+      (this.session.status !== 'playing' && this.session.status !== 'paused')
+    ) {
+      return;
+    }
+    try {
+      // IINA 1.4.4's generic Plugins toolbar action opens the container without
+      // selecting a plugin tab. show() explicitly selects this plugin, attaches
+      // its webview to the native container, and gives it a usable viewport.
+      this.api.sidebar.show();
+      this.sidebarPresented = true;
+      this.logger.info('player.sidebar.presented');
+    } catch (error) {
+      this.logger.warn('Could not present the Jellyfin player sidebar', error);
+    }
   }
 
   private handleViewAction(raw: unknown, source: 'sidebar' | 'overlay'): void {
     if (raw === null || typeof raw !== 'object') return;
     const action = (raw as { action?: unknown }).action;
+    const allowedActions: Record<'sidebar' | 'overlay', ReadonlySet<unknown>> = {
+      sidebar: new Set([
+        'host.ready',
+        'host.webviewError',
+        'window.openCatalog',
+        'settings.chapterSkipMode',
+        'player.pause',
+        'player.resume',
+      ]),
+      overlay: new Set([
+        'host.ready',
+        'host.webviewError',
+        'window.openCatalog',
+        'chapterSkip.skip',
+        'upNext.cancel',
+        'upNext.playNow',
+      ]),
+    };
+    if (!allowedActions[source].has(action)) {
+      const view = source === 'sidebar' ? this.api.sidebar : this.api.overlay;
+      view.postMessage('host.response', { action, ok: false });
+      return;
+    }
     if (action === 'host.ready') {
+      if (source === 'sidebar') {
+        this.sidebarReady = true;
+        this.clearSidebarRecoveryTimer();
+      } else {
+        this.overlayReady = true;
+      }
+      this.logger.info('player.webview.ready', { source });
       this.publishState();
       this.publishUpNext();
+      this.publishChapterSkipSettings();
+      this.publishChapterSkip();
+      if (source === 'sidebar') this.presentSidebarForManagedPlayback();
+      if (source === 'overlay' && (this.chapterSkip !== undefined || this.upNext !== undefined)) {
+        this.api.overlay.show();
+      }
+    } else if (action === 'host.webviewError') {
+      const candidate = raw as { surface?: unknown; kind?: unknown; message?: unknown };
+      const kind = candidate.kind;
+      const message = candidate.message;
+      if (
+        candidate.surface === source &&
+        (kind === 'error' || kind === 'unhandledrejection' || kind === 'render') &&
+        typeof message === 'string' &&
+        WEBVIEW_ERROR_CATEGORIES.has(message)
+      ) {
+        this.logger.error('player.webview.error', { source, kind, message });
+        if (source === 'sidebar' && kind === 'render' && this.sidebarLoadAttempt < 2) {
+          this.logger.warn('player.sidebar.render-retry', { attempt: this.sidebarLoadAttempt });
+          this.loadSidebarView();
+        }
+      }
     } else if (action === 'window.openCatalog') {
       this.api.preferences.set(CATALOG_OPEN_REQUEST_PREFERENCE_KEY, Date.now());
       this.api.preferences.sync();
@@ -1070,6 +1586,17 @@ export class PlayerRuntime {
           this.publishUpNext();
         }
       }
+    } else if (action === 'settings.chapterSkipMode') {
+      const mode = (raw as { mode?: unknown }).mode;
+      if (mode === 'on' || mode === 'prompt' || mode === 'off') {
+        this.api.preferences.set(CHAPTER_SKIP_MODE_PREFERENCE_KEY, mode);
+        this.api.preferences.sync();
+        this.chapterSkipMode = mode;
+        this.clearChapterSkip(true);
+        this.handledChapterKey = undefined;
+        this.publishChapterSkipSettings();
+        if (mode !== 'off') this.reconcileChapterSkip(true);
+      }
     } else if (action === 'player.pause') {
       this.api.core.pause();
     } else if (action === 'player.resume') {
@@ -1080,10 +1607,20 @@ export class PlayerRuntime {
       const itemId = this.upNext.itemId;
       this.clearUpNext(true);
       this.api.global.postMessage(PLAYER_MESSAGES.playNext, { itemId });
+    } else if (action === 'chapterSkip.skip') {
+      this.performPromptedChapterSkip(raw as Record<string, unknown>);
     }
     const view = source === 'sidebar' ? this.api.sidebar : this.api.overlay;
     view.postMessage('host.response', { action, ok: true });
   }
 }
 
-export { localStartPositionSeconds, safeHeaders, safeSubtitleExtension, transcodeStartOffset };
+export {
+  chapterSkipTarget,
+  localStartPositionSeconds,
+  parseChapterSkipMode,
+  parseSkipChapterTitles,
+  safeHeaders,
+  safeSubtitleExtension,
+  transcodeStartOffset,
+};

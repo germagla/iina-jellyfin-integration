@@ -264,6 +264,15 @@ const preferenceText = JSON.stringify(manifest.preferenceDefaults ?? {}).toLower
 if (/token|password|secret|api[_-]?key/.test(preferenceText)) {
   failures.push('Preference defaults contain a secret-shaped key');
 }
+if (manifest.preferenceDefaults?.chapterSkipMode !== 'prompt') {
+  failures.push('Chapter skipping must default to prompt mode');
+}
+if (
+  manifest.preferenceDefaults?.skipChapterTitles !==
+  'Opening,Intro,Introduction,Opening Credits,Opening Theme,Main Title,Title Sequence,Theme,Theme Song,OP,Ending,Outro,Credits,End Credits,Closing Credits,Final Credits,Credit Roll,Closing Theme,ED'
+) {
+  failures.push('Chapter skipping must include the supported common intro and credits titles');
+}
 
 try {
   const preferencesHtml = await readFile(path.join(root, manifest.preferencesPage), 'utf8');
@@ -278,6 +287,12 @@ try {
   }
   if (!preferencesHtml.includes('⌥⌘J')) {
     failures.push('Plugin preferences must document the ⌥⌘J catalog shortcut');
+  }
+  if (!/type=["']radio["'][^>]*name=["']chapterSkipMode["']/i.test(preferencesHtml)) {
+    failures.push('Plugin preferences must expose the chapter skip mode');
+  }
+  if (!/data-pref-key=["']skipChapterTitles["']/i.test(preferencesHtml)) {
+    failures.push('Plugin preferences must expose chapter title matching');
   }
 } catch {
   // The missing preferences page was already reported above.

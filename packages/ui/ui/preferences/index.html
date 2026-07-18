@@ -24,6 +24,42 @@
       <p class="small status" data-open-status role="status" aria-live="polite"></p>
     </section>
 
+    <section class="pref-section playback-section" aria-labelledby="playback-heading">
+      <h2 id="playback-heading">Chapter Skipping</h2>
+      <fieldset class="chapter-mode-options" aria-describedby="chapter-skip-mode-help">
+        <legend>Behavior</legend>
+        <label>
+          <input type="radio" name="chapterSkipMode" value="on" />
+          <span><strong>On</strong><small>Skip matching chapters automatically</small></span>
+        </label>
+        <label>
+          <input type="radio" name="chapterSkipMode" value="prompt" />
+          <span><strong>Prompt</strong><small>Show a skip button for ten seconds</small></span>
+        </label>
+        <label>
+          <input type="radio" name="chapterSkipMode" value="off" />
+          <span><strong>Off</strong><small>Never skip chapters</small></span>
+        </label>
+      </fieldset>
+      <p id="chapter-skip-mode-help" class="small secondary pref-help playback-field-help">
+        Prompt is the default. On skips matching chapters without asking and remains enabled for
+        every file until changed here or in the player sidebar.
+      </p>
+      <label for="skip-chapter-titles">Offer skip for chapter titles</label>
+      <input
+        id="skip-chapter-titles"
+        type="text"
+        data-pref-key="skipChapterTitles"
+        maxlength="4096"
+        aria-describedby="skip-chapter-titles-help"
+      />
+      <p id="skip-chapter-titles-help" class="small secondary pref-help">
+        Enter chapter titles separated by commas. Matching is case-insensitive. Defaults include
+        Opening, Intro, OP, Ending, Outro, Credits, and common title/credit variants. A final
+        matching chapter skips to the end of the file.
+      </p>
+    </section>
+
     <section class="pref-section diagnostics-section" aria-labelledby="diagnostics-heading">
       <div>
         <h2 id="diagnostics-heading">Diagnostics</h2>
