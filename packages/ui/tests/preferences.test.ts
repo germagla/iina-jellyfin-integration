@@ -114,4 +114,23 @@ describe('plugin preferences', () => {
     expect(set).toHaveBeenCalledWith(CHAPTER_SKIP_MODE_PREFERENCE_KEY, 'on');
     expect(inputs.find((input) => input.checked)?.value).toBe('on');
   });
+
+  it('restores the previous mode when IINA cannot persist a change', () => {
+    const inputs = renderChapterSkipModes();
+    let resolvePreference: ((value: unknown) => void) | undefined;
+    bindPreferencesPage(document, {
+      set: () => {
+        throw new Error('preferences unavailable');
+      },
+      get: (_key, callback) => {
+        resolvePreference = callback;
+      },
+    });
+
+    fireEvent.click(inputs[0]!);
+    expect(inputs.find((input) => input.checked)?.value).toBe('prompt');
+
+    resolvePreference?.('off');
+    expect(inputs.find((input) => input.checked)?.value).toBe('off');
+  });
 });

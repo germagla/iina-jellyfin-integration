@@ -21,7 +21,9 @@ function bindChapterSkipMode(root: Document, preferences: PreferencesPageBridge 
   ).filter((input) => isChapterSkipMode(input.value));
   if (inputs.length !== 3) return;
 
+  let selectedMode: ChapterSkipMode = 'prompt';
   const select = (mode: ChapterSkipMode): void => {
+    selectedMode = mode;
     for (const input of inputs) input.checked = input.value === mode;
   };
 
@@ -32,8 +34,16 @@ function bindChapterSkipMode(root: Document, preferences: PreferencesPageBridge 
   for (const input of inputs) {
     input.addEventListener('change', () => {
       if (input.checked && preferences !== undefined) {
-        changedByUser = true;
-        preferences.set(CHAPTER_SKIP_MODE_PREFERENCE_KEY, input.value);
+        const mode = input.value;
+        if (!isChapterSkipMode(mode)) return;
+        const previousMode = selectedMode;
+        try {
+          preferences.set(CHAPTER_SKIP_MODE_PREFERENCE_KEY, mode);
+          selectedMode = mode;
+          changedByUser = true;
+        } catch {
+          select(previousMode);
+        }
       }
     });
   }

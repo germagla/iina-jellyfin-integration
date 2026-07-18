@@ -20,6 +20,8 @@ back to Jellyfin.
 The current release supports one Jellyfin server and user, movies, and television. Music, Live TV,
 casting, offline downloads, SyncPlay, and multiple servers are not supported yet.
 
+See the [changelog](CHANGELOG.md) for release notes and contributor credits.
+
 ## Install
 
 Requires IINA 1.4.4 or later.
