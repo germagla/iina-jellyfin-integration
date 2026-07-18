@@ -23,6 +23,7 @@
     "diagnosticLogRevealRequestAtMs": 0,
     "foregroundPollSeconds": 60,
     "artworkCacheMaxBytes": 52428800,
-    "autoSkipChapterTitles": "Opening,opening,Ending,ending"
+    "chapterSkipMode": "prompt",
+    "skipChapterTitles": "Opening,Ending"
   }
 }

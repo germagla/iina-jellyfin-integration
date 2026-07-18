@@ -59,9 +59,52 @@ small {
   margin-bottom: 4px;
 }
 
-.playback-section input {
+.playback-section > input[type='text'] {
   width: 100%;
   margin-bottom: 4px;
+}
+
+.playback-field-help {
+  margin-bottom: 10px;
+}
+
+.chapter-mode-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  padding: 0;
+  margin: 0 0 6px;
+  border: 0;
+}
+
+.chapter-mode-options legend {
+  margin-bottom: 4px;
+}
+
+.chapter-mode-options label {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 7px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 7px;
+}
+
+.chapter-mode-options input {
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+}
+
+.chapter-mode-options span,
+.chapter-mode-options strong,
+.chapter-mode-options small {
+  display: block;
+}
+
+.chapter-mode-options small {
+  margin-top: 2px;
+  line-height: 1.25;
+  opacity: 0.58;
 }
 
 .status {

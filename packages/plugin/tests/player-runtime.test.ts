@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PlaybackPlan, PlaybackSessionState } from '@iina-jellyfin/core';
 import {
+  chapterSkipTarget,
   localStartPositionSeconds,
-  parseAutoSkipChapterTitles,
+  parseChapterSkipMode,
+  parseSkipChapterTitles,
   PlayerRuntime,
   safeHeaders,
   safeSubtitleExtension,
@@ -130,38 +132,97 @@ function seedSession(
   if (externalSubtitlePath !== undefined) internals.externalSubtitlePath = externalSubtitlePath;
 }
 
-describe('auto-skip chapter boundaries', () => {
-  it('parses comma-separated preference values into trimmed chapter titles', () => {
-    expect(parseAutoSkipChapterTitles('Opening, opening,Ending,ending,, ')).toEqual([
-      'Opening',
+function setChapterPreferences(
+  api: ReturnType<typeof createRuntime>['api'],
+  mode: 'on' | 'prompt' | 'off',
+  titles = 'Opening,Ending',
+): void {
+  api.preferences.get.mockImplementation((key: string) => {
+    if (key === 'chapterSkipMode') return mode;
+    if (key === 'skipChapterTitles') return titles;
+    return undefined;
+  });
+}
+
+function installedChapterHandler(api: ReturnType<typeof createRuntime>['api']): () => void {
+  return api.event.on.mock.calls.find(
+    ([name]) => name === 'mpv.chapter.changed',
+  )?.[1] as () => void;
+}
+
+function installedDurationHandler(api: ReturnType<typeof createRuntime>['api']): () => void {
+  return api.event.on.mock.calls.find(
+    ([name]) => name === 'mpv.duration.changed',
+  )?.[1] as () => void;
+}
+
+function loadPlayerViews(api: ReturnType<typeof createRuntime>['api']): void {
+  const handler = api.event.on.mock.calls.find(
+    ([name]) => name === 'iina.window-loaded',
+  )?.[1] as () => void;
+  handler();
+}
+
+describe('chapter skipping', () => {
+  it('normalizes configured titles and defaults invalid modes to prompt', () => {
+    expect(parseSkipChapterTitles('Opening, opening,Ending,ENDING,, ')).toEqual([
       'opening',
-      'Ending',
       'ending',
     ]);
-    expect(parseAutoSkipChapterTitles(undefined)).toEqual([]);
+    expect(parseSkipChapterTitles(undefined)).toEqual([]);
+    expect(parseSkipChapterTitles('x'.repeat(5_000))).toEqual(['x'.repeat(128)]);
+    expect(
+      parseSkipChapterTitles(Array.from({ length: 40 }, (_, index) => `Title ${index}`).join(',')),
+    ).toHaveLength(32);
+    expect(parseChapterSkipMode('on')).toBe('on');
+    expect(parseChapterSkipMode('off')).toBe('off');
+    expect(parseChapterSkipMode('invalid')).toBe('prompt');
   });
 
-  it('seeks to the next chapter when the current title is configured', () => {
+  it('calculates bounded and final chapter targets without inventing unsafe durations', () => {
+    const chapters = [
+      { title: 'Opening', start: 0 },
+      { title: 'Episode', start: 90 },
+      { title: 'Ending', start: 1_200 },
+    ];
+    expect(chapterSkipTarget(chapters, 0, 1_260)).toMatchObject({
+      seconds: 90,
+      final: false,
+    });
+    expect(chapterSkipTarget(chapters, 2, 1_260)).toMatchObject({
+      seconds: 1_259,
+      final: true,
+    });
+    expect(chapterSkipTarget(chapters, 2, 1_260, 1_259.5)).toBeUndefined();
+    expect(chapterSkipTarget(chapters, 2, Number.NaN)).toBeUndefined();
+    expect(chapterSkipTarget(chapters, 3, 1_260)).toBeUndefined();
+  });
+
+  it('auto-skips matching titles case-insensitively and suppresses duplicate events', () => {
     vi.useFakeTimers();
     try {
       const { runtime, api } = createRuntime();
       seedSession(runtime, 'playing');
-      api.preferences.get.mockReturnValue('Opening,opening,Ending,ending');
-      api.core.status.position = 15;
+      setChapterPreferences(api, 'on');
       api.core.getChapters.mockReturnValue([
-        { title: 'Opening', start: 0 },
+        { title: 'OPENING', start: 0 },
         { title: 'Episode', start: 90 },
       ]);
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? 0 : name === 'duration' ? 1_260 : name === 'speed' ? 1 : 0,
+      );
 
       runtime.install();
-      const chapterHandler = api.event.on.mock.calls.find(
-        ([name]) => name === 'mpv.chapter.changed',
-      )?.[1] as (() => void) | undefined;
-      chapterHandler?.();
+      const chapterHandler = installedChapterHandler(api);
+      chapterHandler();
+      chapterHandler();
 
-      expect(api.core.getChapters).toHaveBeenCalledOnce();
-      expect(api.mpv.getNative).not.toHaveBeenCalled();
+      expect(api.core.seekTo).toHaveBeenCalledOnce();
       expect(api.core.seekTo).toHaveBeenCalledWith(90);
+      expect(api.overlay.postMessage).not.toHaveBeenCalledWith(
+        'player.chapterSkip',
+        expect.objectContaining({ title: 'OPENING' }),
+      );
       clearInterval(
         (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
       );
@@ -170,29 +231,498 @@ describe('auto-skip chapter boundaries', () => {
     }
   });
 
-  it('does not skip an unmatched or final chapter', () => {
+  it('prompts for ten seconds and accepts only the current generation and chapter', () => {
     vi.useFakeTimers();
     try {
       const { runtime, api } = createRuntime();
       seedSession(runtime, 'playing');
-      api.preferences.get.mockReturnValue('Opening,opening,Ending,ending');
-      api.core.status.position = 15;
+      setChapterPreferences(api, 'prompt');
       api.core.getChapters.mockReturnValue([
-        { title: 'Episode', start: 0 },
-        { title: 'Ending', start: 45 },
+        { title: 'Opening', start: 0 },
+        { title: 'Episode', start: 90 },
       ]);
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? 0 : name === 'duration' ? 1_260 : name === 'speed' ? 1 : 0,
+      );
 
       runtime.install();
-      const chapterHandler = api.event.on.mock.calls.find(
-        ([name]) => name === 'mpv.chapter.changed',
-      )?.[1] as (() => void) | undefined;
-      chapterHandler?.();
-      expect(api.core.seekTo).not.toHaveBeenCalled();
+      loadPlayerViews(api);
+      installedChapterHandler(api)();
+      const prompt = api.overlay.postMessage.mock.calls.find(
+        ([name, value]) => name === 'player.chapterSkip' && value !== null,
+      )?.[1] as { generation: number; chapterIndex: number };
+      const actionHandler = api.overlay.onMessage.mock.calls.find(
+        ([name]) => name === 'host.action',
+      )?.[1] as (value: unknown) => void;
 
-      api.core.status.position = 45;
-      api.core.getChapters.mockReturnValue([{ title: 'Ending', start: 45 }]);
-      chapterHandler?.();
+      actionHandler({ action: 'chapterSkip.skip', generation: 99, chapterIndex: 0 });
       expect(api.core.seekTo).not.toHaveBeenCalled();
+      actionHandler({ action: 'chapterSkip.skip', ...prompt });
+      expect(api.core.seekTo).toHaveBeenCalledWith(90);
+
+      api.core.seekTo.mockClear();
+      (runtime as unknown as { handledChapterKey: string | undefined }).handledChapterKey =
+        undefined;
+      installedChapterHandler(api)();
+      vi.advanceTimersByTime(10_000);
+      expect(api.overlay.postMessage).toHaveBeenCalledWith('player.chapterSkip', null);
+      expect(api.overlay.hide).toHaveBeenCalled();
+      expect(api.core.seekTo).not.toHaveBeenCalled();
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a final ending when native duration becomes available', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api, logger } = createRuntime();
+      seedSession(runtime, 'playing');
+      setChapterPreferences(api, 'on');
+      api.core.getChapters.mockReturnValue([{ title: 'Ending', start: 1_200 }]);
+      let duration = Number.NaN;
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? 0 : name === 'duration' ? duration : name === 'speed' ? 1 : 0,
+      );
+
+      runtime.install();
+      installedChapterHandler(api)();
+      expect(api.core.seekTo).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(
+        'player.chapter.skip-unavailable',
+        expect.objectContaining({ chapter: 0, reason: 'missing-safe-target' }),
+      );
+
+      duration = 1_260;
+      installedDurationHandler(api)();
+      expect(api.core.seekTo).toHaveBeenCalledWith(1_259);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets the normal end-file path complete Jellyfin playback after a final skip', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api, transport } = createRuntime();
+      seedSession(runtime, 'playing');
+      const longerServerPlan = { ...plan, runtimeTicks: 620_000_000 };
+      const internals = runtime as unknown as {
+        launch: PlayerLaunch;
+        session: PlaybackSessionState;
+      };
+      internals.launch = { ...launch, plan: longerServerPlan };
+      internals.session = {
+        ...internals.session,
+        plan: longerServerPlan,
+        durationTicks: longerServerPlan.runtimeTicks,
+      };
+      setChapterPreferences(api, 'on');
+      api.core.getChapters.mockReturnValue([{ title: 'Ending', start: 45 }]);
+      let position = 45;
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter'
+          ? 0
+          : name === 'duration'
+            ? 60
+            : name === 'time-pos'
+              ? position
+              : name === 'speed'
+                ? 1
+                : 0,
+      );
+
+      runtime.install();
+      installedChapterHandler(api)();
+      expect(api.core.seekTo).toHaveBeenCalledWith(59);
+      position = Number.NaN;
+      await (runtime as unknown as { ended(): Promise<void> }).ended();
+
+      expect((runtime as unknown as { session: PlaybackSessionState }).session.stopReason).toBe(
+        'completed',
+      );
+      expect(transport.execute).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'https://media.test/Sessions/Playing/Stopped',
+          body: expect.objectContaining({ PositionTicks: 590_000_000 }),
+        }),
+      );
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not offer or perform a final skip that would seek backward', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      seedSession(runtime, 'playing');
+      setChapterPreferences(api, 'prompt');
+      api.core.getChapters.mockReturnValue([{ title: 'Ending', start: 45 }]);
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter'
+          ? 0
+          : name === 'duration'
+            ? 60
+            : name === 'time-pos'
+              ? 59.5
+              : name === 'speed'
+                ? 1
+                : 0,
+      );
+
+      runtime.install();
+      loadPlayerViews(api);
+      installedChapterHandler(api)();
+
+      expect(api.core.seekTo).not.toHaveBeenCalled();
+      expect(
+        api.overlay.postMessage.mock.calls.some(
+          ([name, value]) => name === 'player.chapterSkip' && value !== null,
+        ),
+      ).toBe(false);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does nothing in off mode and reconciles the initial chapter after media loads', async () => {
+    vi.useFakeTimers();
+    try {
+      const off = createRuntime();
+      seedSession(off.runtime, 'playing');
+      setChapterPreferences(off.api, 'off');
+      off.api.core.getChapters.mockReturnValue([
+        { title: 'Opening', start: 0 },
+        { title: 'Episode', start: 90 },
+      ]);
+      off.api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? 0 : name === 'duration' ? 1_260 : name === 'speed' ? 1 : 0,
+      );
+      off.runtime.install();
+      installedChapterHandler(off.api)();
+      expect(off.api.core.seekTo).not.toHaveBeenCalled();
+
+      const initial = createRuntime();
+      seedSession(initial.runtime, 'preparing');
+      setChapterPreferences(initial.api, 'on');
+      initial.api.core.getChapters.mockReturnValue([
+        { title: 'Opening', start: 0 },
+        { title: 'Episode', start: 90 },
+      ]);
+      initial.api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? 0 : name === 'duration' ? 1_260 : name === 'speed' ? 1 : 0,
+      );
+      initial.runtime.install();
+      await (initial.runtime as unknown as { mediaLoaded(): Promise<void> }).mediaLoaded();
+      expect(initial.api.core.seekTo).toHaveBeenCalledWith(90);
+
+      clearInterval(
+        (off.runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+      clearInterval(
+        (initial.runtime as unknown as { progressTimer: ReturnType<typeof setInterval> })
+          .progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('enqueues playback start before an initial automatic skip can report progress', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api, transport } = createRuntime();
+      seedSession(runtime, 'preparing');
+      setChapterPreferences(api, 'on');
+      api.core.getChapters.mockReturnValue([
+        { title: 'Opening', start: 0 },
+        { title: 'Episode', start: 30 },
+      ]);
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter'
+          ? 0
+          : name === 'duration'
+            ? 60
+            : name === 'time-pos'
+              ? 0
+              : name === 'speed'
+                ? 1
+                : 0,
+      );
+      runtime.install();
+      api.core.seekTo.mockImplementation(() => {
+        void (
+          runtime as unknown as {
+            reportImmediate(eventName: 'seek'): Promise<void>;
+          }
+        ).reportImmediate('seek');
+      });
+
+      await (runtime as unknown as { mediaLoaded(): Promise<void> }).mediaLoaded();
+      await vi.waitFor(() => expect(transport.execute).toHaveBeenCalledTimes(2));
+
+      expect(transport.execute.mock.calls.map(([request]) => request.url)).toEqual([
+        'https://media.test/Sessions/Playing',
+        'https://media.test/Sessions/Playing/Progress',
+      ]);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('persists sidebar mode changes and applies them immediately to the current chapter', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      seedSession(runtime, 'playing');
+      setChapterPreferences(api, 'prompt');
+      api.core.getChapters.mockReturnValue([
+        { title: 'Opening', start: 0 },
+        { title: 'Episode', start: 90 },
+      ]);
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? 0 : name === 'duration' ? 1_260 : name === 'speed' ? 1 : 0,
+      );
+      runtime.install();
+      loadPlayerViews(api);
+      installedChapterHandler(api)();
+      const actionHandler = api.sidebar.onMessage.mock.calls.find(
+        ([name]) => name === 'host.action',
+      )?.[1] as (value: unknown) => void;
+
+      actionHandler({ action: 'settings.chapterSkipMode', mode: 'off' });
+      expect(api.preferences.set).toHaveBeenCalledWith('chapterSkipMode', 'off');
+      expect(api.preferences.sync).toHaveBeenCalled();
+      expect(api.overlay.postMessage).toHaveBeenCalledWith('player.chapterSkip', null);
+
+      api.preferences.get.mockImplementation((key: string) =>
+        key === 'chapterSkipMode'
+          ? 'on'
+          : key === 'skipChapterTitles'
+            ? 'Opening,Ending'
+            : undefined,
+      );
+      actionHandler({ action: 'settings.chapterSkipMode', mode: 'on' });
+      expect(api.core.seekTo).toHaveBeenCalledWith(90);
+      expect(api.sidebar.postMessage).toHaveBeenCalledWith('player.chapterSkipSettings', {
+        mode: 'on',
+      });
+
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('offers a fresh prompt after leaving and re-entering a matching chapter', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      seedSession(runtime, 'playing');
+      setChapterPreferences(api, 'prompt');
+      api.core.getChapters.mockReturnValue([
+        { title: 'Opening', start: 0 },
+        { title: 'Episode', start: 90 },
+      ]);
+      let chapter = 0;
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? chapter : name === 'duration' ? 1_260 : name === 'speed' ? 1 : 0,
+      );
+      runtime.install();
+      loadPlayerViews(api);
+      const chapterHandler = installedChapterHandler(api);
+
+      chapterHandler();
+      chapter = 1;
+      chapterHandler();
+      chapter = 0;
+      chapterHandler();
+
+      const prompts = api.overlay.postMessage.mock.calls.filter(
+        ([name, value]) => name === 'player.chapterSkip' && value !== null,
+      );
+      expect(prompts).toHaveLength(2);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('suppresses chapter prompts while Up Next owns the overlay', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      seedSession(runtime, 'playing');
+      setChapterPreferences(api, 'prompt');
+      api.core.getChapters.mockReturnValue([
+        { title: 'Ending', start: 45 },
+        { title: 'Credits', start: 55 },
+      ]);
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? 0 : name === 'duration' ? 60 : name === 'speed' ? 1 : 0,
+      );
+      runtime.install();
+      loadPlayerViews(api);
+      (runtime as unknown as { upNext: unknown }).upNext = {
+        itemId: 'next',
+        title: 'Next episode',
+        remainingSeconds: 10,
+        autoplay: false,
+      };
+
+      installedChapterHandler(api)();
+
+      expect(api.core.seekTo).not.toHaveBeenCalled();
+      expect(
+        api.overlay.postMessage.mock.calls.some(
+          ([name, value]) => name === 'player.chapterSkip' && value !== null,
+        ),
+      ).toBe(false);
+      expect((runtime as unknown as { chapterSkip?: unknown }).chapterSkip).toBeUndefined();
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still auto-skips in on mode while Up Next owns the overlay', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      seedSession(runtime, 'playing');
+      setChapterPreferences(api, 'on');
+      api.core.getChapters.mockReturnValue([
+        { title: 'Ending', start: 45 },
+        { title: 'Credits', start: 55 },
+      ]);
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter'
+          ? 0
+          : name === 'duration'
+            ? 60
+            : name === 'time-pos'
+              ? 45
+              : name === 'speed'
+                ? 1
+                : 0,
+      );
+      runtime.install();
+      (runtime as unknown as { upNext: unknown }).upNext = {
+        itemId: 'next',
+        title: 'Next episode',
+        remainingSeconds: 10,
+        autoplay: false,
+      };
+
+      installedChapterHandler(api)();
+
+      expect(api.core.seekTo).toHaveBeenCalledWith(55);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('polls preferences on the playback heartbeat and clears stale prompts', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      seedSession(runtime, 'playing');
+      let mode: 'prompt' | 'off' = 'prompt';
+      api.preferences.get.mockImplementation((key: string) =>
+        key === 'chapterSkipMode'
+          ? mode
+          : key === 'skipChapterTitles'
+            ? 'Opening,Ending'
+            : undefined,
+      );
+      api.core.getChapters.mockReturnValue([
+        { title: 'Opening', start: 0 },
+        { title: 'Episode', start: 90 },
+      ]);
+      api.mpv.getNumber.mockImplementation((name: string) =>
+        name === 'chapter' ? 0 : name === 'duration' ? 1_260 : name === 'speed' ? 1 : 0,
+      );
+      runtime.install();
+      loadPlayerViews(api);
+      installedChapterHandler(api)();
+      mode = 'off';
+
+      await (runtime as unknown as { periodicProgress(): Promise<void> }).periodicProgress();
+
+      expect(api.sidebar.postMessage).toHaveBeenCalledWith('player.chapterSkipSettings', {
+        mode: 'off',
+      });
+      expect(api.overlay.postMessage).toHaveBeenCalledWith('player.chapterSkip', null);
+      clearInterval(
+        (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('enforces source-specific webview action allowlists', () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      runtime.install();
+      const overlayHandler = api.overlay.onMessage.mock.calls.find(
+        ([name]) => name === 'host.action',
+      )?.[1] as (value: unknown) => void;
+      const sidebarHandler = api.sidebar.onMessage.mock.calls.find(
+        ([name]) => name === 'host.action',
+      )?.[1] as (value: unknown) => void;
+
+      overlayHandler({ action: 'settings.chapterSkipMode', mode: 'on' });
+      sidebarHandler({ action: 'chapterSkip.skip', generation: 1, chapterIndex: 0 });
+      sidebarHandler({ action: 'settings.autoplay', enabled: true });
+      sidebarHandler({ action: 'upNext.cancel' });
+      sidebarHandler({ action: 'upNext.playNow' });
+
+      expect(api.preferences.set).not.toHaveBeenCalledWith('chapterSkipMode', 'on');
+      expect(api.overlay.postMessage).toHaveBeenCalledWith('host.response', {
+        action: 'settings.chapterSkipMode',
+        ok: false,
+      });
+      expect(api.sidebar.postMessage).toHaveBeenCalledWith('host.response', {
+        action: 'chapterSkip.skip',
+        ok: false,
+      });
+      for (const action of ['settings.autoplay', 'upNext.cancel', 'upNext.playNow']) {
+        expect(api.sidebar.postMessage).toHaveBeenCalledWith('host.response', {
+          action,
+          ok: false,
+        });
+      }
+      expect(api.global.postMessage).not.toHaveBeenCalledWith(
+        'jellyfin.player.play-next',
+        expect.anything(),
+      );
       clearInterval(
         (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
       );

@@ -14,6 +14,7 @@ back to Jellyfin.
 - Resume progress, media versions, audio tracks, and subtitles
 - Direct Play, remuxing, and server transcoding when needed
 - Live playback status in the catalog and an IINA player sidebar
+- Chapter skipping with persistent On, Prompt, and Off modes; Prompt is the default
 - One managed player by default, with an option to open another window
 
 The current release supports one Jellyfin server and user, movies, and television. Music, Live TV,
@@ -35,6 +36,10 @@ addresses default to HTTPS.
 
 Plugin actions are also available from IINA → Settings → Plugins → Jellyfin for IINA →
 Preferences.
+
+Chapter skipping matches the configured chapter titles case-insensitively. Choose **On** to skip
+automatically, **Prompt** to show a ten-second button over the video, or **Off** to disable it. The
+same setting is available in the Jellyfin player sidebar and remains selected for future files.
 
 ## Development
 

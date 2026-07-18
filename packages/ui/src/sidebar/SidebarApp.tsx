@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Artwork } from '../catalog/Artwork';
 import { ProgressBar } from '../components/ProgressBar';
 import { createPlayerUiHost, type PlayerUiHost, type PlayerViewState } from './host';
+import type { ChapterSkipMode } from './host';
 import './sidebar.css';
 
 export interface SidebarAppProps {
@@ -32,12 +33,27 @@ function episodeContext(state: {
   return [state.seriesName, episode].filter(Boolean).join(' · ') || undefined;
 }
 
+const chapterSkipDescriptions: Record<ChapterSkipMode, string> = {
+  on: 'Skips matching chapters automatically',
+  prompt: 'Shows a skip button for ten seconds',
+  off: 'Never skips chapters',
+};
+
 export function SidebarApp({ host: hostProp }: SidebarAppProps) {
   const [host] = useState(() => hostProp ?? createPlayerUiHost());
   const [playerState, setPlayerState] = useState<PlayerViewState | undefined>(() =>
     host.getPlayerState(),
   );
   useEffect(() => host.subscribePlayerState(setPlayerState), [host]);
+  const [chapterSkipSettings, setChapterSkipSettings] = useState(() =>
+    host.getChapterSkipSettings(),
+  );
+  useEffect(() => host.subscribeChapterSkipSettings(setChapterSkipSettings), [host]);
+
+  const changeChapterSkipMode = (mode: ChapterSkipMode): void => {
+    setChapterSkipSettings({ mode });
+    void host.send('settings.chapterSkipMode', { mode });
+  };
 
   const progress = useMemo(() => {
     if (!playerState?.durationTicks) return 0;
@@ -109,6 +125,22 @@ export function SidebarApp({ host: hostProp }: SidebarAppProps) {
           <span>{ticksToClock(playerState?.positionTicks)}</span>
           <span>{remainingTicks > 0 ? `−${ticksToClock(remainingTicks)}` : '0:00'}</span>
         </div>
+      </section>
+
+      <section className="chapter-skip-setting" aria-labelledby="chapter-skip-heading">
+        <span>
+          <strong id="chapter-skip-heading">Chapter skipping</strong>
+          <small>{chapterSkipDescriptions[chapterSkipSettings.mode]}</small>
+        </span>
+        <select
+          aria-label="Chapter skipping"
+          value={chapterSkipSettings.mode}
+          onChange={(event) => changeChapterSkipMode(event.currentTarget.value as ChapterSkipMode)}
+        >
+          <option value="on">On</option>
+          <option value="prompt">Prompt</option>
+          <option value="off">Off</option>
+        </select>
       </section>
 
       <button

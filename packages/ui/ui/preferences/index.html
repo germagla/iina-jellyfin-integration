@@ -25,17 +25,37 @@
     </section>
 
     <section class="pref-section playback-section" aria-labelledby="playback-heading">
-      <h2 id="playback-heading">Playback</h2>
-      <label for="auto-skip-chapter-titles">Auto-skip chapter titles</label>
+      <h2 id="playback-heading">Chapter Skipping</h2>
+      <fieldset class="chapter-mode-options" aria-describedby="chapter-skip-mode-help">
+        <legend>Behavior</legend>
+        <label>
+          <input type="radio" name="chapterSkipMode" value="on" />
+          <span><strong>On</strong><small>Skip matching chapters automatically</small></span>
+        </label>
+        <label>
+          <input type="radio" name="chapterSkipMode" value="prompt" checked />
+          <span><strong>Prompt</strong><small>Show a skip button for ten seconds</small></span>
+        </label>
+        <label>
+          <input type="radio" name="chapterSkipMode" value="off" />
+          <span><strong>Off</strong><small>Never skip chapters</small></span>
+        </label>
+      </fieldset>
+      <p id="chapter-skip-mode-help" class="small secondary pref-help playback-field-help">
+        Prompt is the default. On skips matching chapters without asking and remains enabled for
+        every file until changed here or in the player sidebar.
+      </p>
+      <label for="skip-chapter-titles">Offer skip for chapter titles</label>
       <input
-        id="auto-skip-chapter-titles"
+        id="skip-chapter-titles"
         type="text"
-        data-pref-key="autoSkipChapterTitles"
-        aria-describedby="auto-skip-chapter-titles-help"
+        data-pref-key="skipChapterTitles"
+        maxlength="4096"
+        aria-describedby="skip-chapter-titles-help"
       />
-      <p id="auto-skip-chapter-titles-help" class="small secondary pref-help">
-        Enter exact chapter titles separated by commas. Matching chapters automatically advance to
-        the next chapter.
+      <p id="skip-chapter-titles-help" class="small secondary pref-help">
+        Enter chapter titles separated by commas. Matching is case-insensitive. A final matching
+        chapter skips to the end of the file.
       </p>
     </section>
 
