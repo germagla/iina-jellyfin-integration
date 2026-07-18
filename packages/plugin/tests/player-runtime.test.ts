@@ -135,7 +135,7 @@ function seedSession(
 function setChapterPreferences(
   api: ReturnType<typeof createRuntime>['api'],
   mode: 'on' | 'prompt' | 'off',
-  titles = 'Opening,Ending',
+  titles = 'Opening,Intro,Introduction,Opening Credits,Opening Theme,Main Title,Title Sequence,Theme,Theme Song,OP,Ending,Outro,Credits,End Credits,Closing Credits,Final Credits,Credit Roll,Closing Theme,ED',
 ): void {
   api.preferences.get.mockImplementation((key: string) => {
     if (key === 'chapterSkipMode') return mode;
@@ -205,7 +205,7 @@ describe('chapter skipping', () => {
       seedSession(runtime, 'playing');
       setChapterPreferences(api, 'on');
       api.core.getChapters.mockReturnValue([
-        { title: 'OPENING', start: 0 },
+        { title: 'INTRO', start: 0 },
         { title: 'Episode', start: 90 },
       ]);
       api.mpv.getNumber.mockImplementation((name: string) =>
@@ -221,7 +221,7 @@ describe('chapter skipping', () => {
       expect(api.core.seekTo).toHaveBeenCalledWith(90);
       expect(api.overlay.postMessage).not.toHaveBeenCalledWith(
         'player.chapterSkip',
-        expect.objectContaining({ title: 'OPENING' }),
+        expect.objectContaining({ title: 'INTRO' }),
       );
       clearInterval(
         (runtime as unknown as { progressTimer: ReturnType<typeof setInterval> }).progressTimer,
@@ -324,7 +324,7 @@ describe('chapter skipping', () => {
         durationTicks: longerServerPlan.runtimeTicks,
       };
       setChapterPreferences(api, 'on');
-      api.core.getChapters.mockReturnValue([{ title: 'Ending', start: 45 }]);
+      api.core.getChapters.mockReturnValue([{ title: 'CREDITS', start: 45 }]);
       let position = 45;
       api.mpv.getNumber.mockImplementation((name: string) =>
         name === 'chapter'

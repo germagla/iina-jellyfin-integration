@@ -267,8 +267,11 @@ if (/token|password|secret|api[_-]?key/.test(preferenceText)) {
 if (manifest.preferenceDefaults?.chapterSkipMode !== 'prompt') {
   failures.push('Chapter skipping must default to prompt mode');
 }
-if (manifest.preferenceDefaults?.skipChapterTitles !== 'Opening,Ending') {
-  failures.push('Chapter skipping must default to Opening and Ending titles');
+if (
+  manifest.preferenceDefaults?.skipChapterTitles !==
+  'Opening,Intro,Introduction,Opening Credits,Opening Theme,Main Title,Title Sequence,Theme,Theme Song,OP,Ending,Outro,Credits,End Credits,Closing Credits,Final Credits,Credit Roll,Closing Theme,ED'
+) {
+  failures.push('Chapter skipping must include the supported common intro and credits titles');
 }
 
 try {

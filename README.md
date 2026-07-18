@@ -37,9 +37,11 @@ addresses default to HTTPS.
 Plugin actions are also available from IINA → Settings → Plugins → Jellyfin for IINA →
 Preferences.
 
-Chapter skipping matches the configured chapter titles case-insensitively. Choose **On** to skip
-automatically, **Prompt** to show a ten-second button over the video, or **Off** to disable it. The
-same setting is available in the Jellyfin player sidebar and remains selected for future files.
+Chapter skipping matches the configured chapter titles case-insensitively. Its defaults cover
+common labels such as Opening, Intro, OP, Ending, Outro, Credits, and their common title/credit
+variants. Choose **On** to skip automatically, **Prompt** to show a ten-second button over the
+video, or **Off** to disable it. The same setting is available in the Jellyfin player sidebar and
+remains selected for future files.
 
 ## Development
 
