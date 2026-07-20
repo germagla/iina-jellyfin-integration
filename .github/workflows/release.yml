@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch main for release ancestry
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+      - name: Require a commit from main
+        run: git merge-base --is-ancestor "$(git rev-list -n 1 "$GITHUB_REF_NAME")" origin/main
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 11.8.0
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Validate release metadata
+        run: pnpm release:validate -- "$GITHUB_REF_NAME"
+      - run: pnpm check
+      - name: Verify committed production bundle
+        run: |
+          git diff --exit-code -- dist
+          test -z "$(git ls-files --others --exclude-standard -- dist)"
+      - name: Create and verify install archive
+        run: |
+          node scripts/create-archive.mjs
+          node scripts/release-notes.mjs "$GITHUB_REF_NAME" .artifacts/release-notes.md
+          unzip -t .artifacts/jellyfin-for-iina.iinaplgz
+          cd .artifacts
+          sha256sum jellyfin-for-iina.iinaplgz > jellyfin-for-iina.iinaplgz.sha256
+      - name: Store verified release assets
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-assets
+          path: |
+            .artifacts/jellyfin-for-iina.iinaplgz
+            .artifacts/jellyfin-for-iina.iinaplgz.sha256
+            .artifacts/release-notes.md
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-assets
+          path: .artifacts
+      - name: Verify downloaded assets
+        run: cd .artifacts && sha256sum --check jellyfin-for-iina.iinaplgz.sha256
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          assets=(
+            .artifacts/jellyfin-for-iina.iinaplgz
+            .artifacts/jellyfin-for-iina.iinaplgz.sha256
+          )
+          if release_is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$release_is_draft" == "false" ]]; then
+              mkdir -p .artifacts/published
+              gh release download "$GITHUB_REF_NAME" \
+                --dir .artifacts/published \
+                --pattern 'jellyfin-for-iina.iinaplgz*'
+              gh release view "$GITHUB_REF_NAME" --json body | jq -j .body \
+                > .artifacts/published/release-notes.md
+              cmp .artifacts/jellyfin-for-iina.iinaplgz \
+                .artifacts/published/jellyfin-for-iina.iinaplgz
+              cmp .artifacts/jellyfin-for-iina.iinaplgz.sha256 \
+                .artifacts/published/jellyfin-for-iina.iinaplgz.sha256
+              cmp .artifacts/release-notes.md .artifacts/published/release-notes.md
+              echo "Release $GITHUB_REF_NAME is already published with identical assets and notes."
+              exit 0
+            fi
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+            gh release edit \
+              "$GITHUB_REF_NAME" \
+              --notes-file .artifacts/release-notes.md \
+              --title "Jellyfin for IINA ${GITHUB_REF_NAME#v}"
+          else
+            gh release create \
+              "$GITHUB_REF_NAME" \
+              "${assets[@]}" \
+              --draft \
+              --verify-tag \
+              --notes-file .artifacts/release-notes.md \
+              --title "Jellyfin for IINA ${GITHUB_REF_NAME#v}"
+          fi
+          gh release edit "$GITHUB_REF_NAME" --draft=false
