@@ -26,6 +26,8 @@ See the [changelog](CHANGELOG.md) for release notes and contributor credits.
 
 Requires IINA 1.4.4 or later.
 
+### From GitHub
+
 1. Open IINA → Settings → Plugins.
 2. Choose **Install from GitHub** and enter:
    `https://github.com/germagla/iina-jellyfin-integration`
@@ -38,6 +40,12 @@ addresses default to HTTPS.
 
 Plugin actions are also available from IINA → Settings → Plugins → Jellyfin for IINA →
 Preferences.
+
+### From a release
+
+Download `jellyfin-for-iina.iinaplgz` from the
+[latest GitHub Release](https://github.com/germagla/iina-jellyfin-integration/releases/latest), then
+open the file with IINA. Both installation methods include IINA's GitHub update metadata.
 
 Chapter skipping matches the configured chapter titles case-insensitively. Its defaults cover
 common labels such as Opening, Intro, OP, Ending, Outro, Credits, and their common title/credit
@@ -77,6 +85,26 @@ pnpm package:archive  # installable package in .artifacts/
 
 The production `dist/` bundle is committed because IINA installs the plugin directly from the
 GitHub repository.
+
+## Release
+
+Update every package version, `PLUGIN_VERSION`, and `Info.json.version`, then increment
+`Info.json.ghVersion`. Move the completed notes in `CHANGELOG.md` under a heading matching the new
+version, build and commit `dist/`, verify the metadata, and push the matching tag:
+
+```sh
+git fetch --tags origin
+pnpm check
+pnpm release:validate -- v0.2.0
+git tag v0.2.0
+git push origin main v0.2.0
+```
+
+The tag workflow reruns all checks and publishes a GitHub Release containing the installable
+`.iinaplgz` archive, its SHA-256 checksum, and the matching changelog section. Automated releases
+accept stable semantic versions; prerelease channels are not supported yet. GitHub Packages is
+intentionally unused because the plugin is distributed as an IINA archive rather than an npm or
+container package.
 
 ## Diagnostics
 

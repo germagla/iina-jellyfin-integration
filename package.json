@@ -28,7 +28,8 @@
     "lint": "eslint .",
     "package:archive": "pnpm build && node scripts/create-archive.mjs",
     "package:validate": "node scripts/validate-package.mjs",
-    "test": "pnpm -r --if-present test",
+    "release:validate": "node scripts/validate-release.mjs",
+    "test": "node --test scripts/release-version.test.mjs scripts/release-notes.test.mjs && pnpm -r --if-present test",
     "test:coverage": "pnpm -r --if-present test:coverage",
     "typecheck": "pnpm -r --if-present typecheck"
   },
