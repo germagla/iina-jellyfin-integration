@@ -6,6 +6,29 @@ Jellyfin for IINA is a Direct Mode client: your library stays on Jellyfin and is
 demand. Playback uses IINA's native mpv player, while progress and session state are synchronized
 back to Jellyfin.
 
+<table>
+  <tr>
+    <td width="50%">
+      <img src="https://raw.githubusercontent.com/germagla/iina-jellyfin-integration/main/.github/assets/catalog-anime.png" alt="Anime library in Jellyfin for IINA">
+      <br><sub><strong>Your libraries, your way.</strong> Each supported Jellyfin library gets its own tab.</sub>
+    </td>
+    <td width="50%">
+      <img src="https://raw.githubusercontent.com/germagla/iina-jellyfin-integration/main/.github/assets/catalog-movies.png" alt="Movie library in Jellyfin for IINA">
+      <br><sub><strong>Designed for the big screen.</strong> Responsive artwork-first browsing.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="https://raw.githubusercontent.com/germagla/iina-jellyfin-integration/main/.github/assets/catalog-shows.png" alt="Television library in Jellyfin for IINA">
+      <br><sub><strong>See what is waiting.</strong> Unwatched counts and progress stay in sync.</sub>
+    </td>
+    <td width="50%">
+      <img src="https://raw.githubusercontent.com/germagla/iina-jellyfin-integration/main/.github/assets/episode-details.png" alt="Episode details and playback controls in Jellyfin for IINA">
+      <br><sub><strong>Play natively in IINA.</strong> Pick an episode, version, audio track, and subtitles.</sub>
+    </td>
+  </tr>
+</table>
+
 ## Features
 
 - Password and Quick Connect sign-in
@@ -14,13 +37,17 @@ back to Jellyfin.
 - Resume progress, media versions, audio tracks, and subtitles
 - Direct Play, remuxing, and server transcoding when needed
 - Live playback status in the catalog and an IINA player sidebar
+- Native IINA playlist entries for up to 100 earlier and 100 later episodes in the current season
+- Meaningful Jellyfin entries in IINA History and Open Recent that can reopen through the saved connection
 - Chapter skipping with persistent On, Prompt, and Off modes; Prompt is the default
 - One managed player by default, with an option to open another window
 
 The current release supports one Jellyfin server and user, movies, and television. Music, Live TV,
 casting, offline downloads, SyncPlay, and multiple servers are not supported yet.
 
-See the [changelog](CHANGELOG.md) for release notes and contributor credits.
+See the
+[changelog](https://github.com/germagla/iina-jellyfin-integration/blob/main/CHANGELOG.md) for release
+notes and contributor credits.
 
 ## Install
 
@@ -52,6 +79,24 @@ common labels such as Opening, Intro, OP, Ending, Outro, Credits, and their comm
 variants. Choose **On** to skip automatically, **Prompt** to show a ten-second button over the
 video, or **Off** to disable it. The same setting is available in the Jellyfin player sidebar and
 remains selected for future files.
+
+IINA records Jellyfin playback in its native History when **Enable playback history** is enabled.
+It also adds played items to Open Recent—and therefore the welcome window—when **Enable “Open
+Recent” menu** and **Track all played files in “Open Recent” menu** are enabled. Entries can reopen
+while the same server connection and Keychain session remain saved, and new entries use readable
+movie or episode titles instead of streaming URLs. The plugin respects those IINA settings.
+Jellyfin remains authoritative for resume progress because IINA's plugin API does not allow
+writing native history progress.
+
+Reopenable entries use small, credential-free marker files in the plugin's private data directory.
+They contain a display title and stable Jellyfin server and item identifiers, but no server
+address, access token, or media URL. IINA does not notify plugins when its History or Open Recent
+lists are cleared, so these markers currently remain until the plugin's data is removed.
+
+For episodes, IINA's playlist shows available earlier and later items in the season with readable
+show, season, episode, and title labels, placing the current episode in its proper sequence. When a
+following episode is queued, playback stays on the completed episode instead of advancing without
+confirmation; choose a queued episode from IINA's playlist when you are ready.
 
 ## Development
 
@@ -104,7 +149,8 @@ The tag workflow reruns all checks and publishes a GitHub Release containing the
 `.iinaplgz` archive, its SHA-256 checksum, and the matching changelog section. Automated releases
 accept stable semantic versions; prerelease channels are not supported yet. GitHub Packages is
 intentionally unused because the plugin is distributed as an IINA archive rather than an npm or
-container package.
+container package. The workflow also mirrors each verified release commit to `master`, which IINA
+1.4.4 still uses for GitHub update checks; development remains on `main`.
 
 ## Diagnostics
 

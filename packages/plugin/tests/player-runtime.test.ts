@@ -10,6 +10,7 @@ import {
   safeSubtitleExtension,
   transcodeStartOffset,
 } from '../src/player-runtime';
+import { createJellyfinMediaLink, createJellyfinMediaReference } from '../src/media-link';
 import type { PlayerLaunch } from '../src/player-messages';
 
 const plan: PlaybackPlan = {
@@ -28,6 +29,12 @@ const plan: PlaybackPlan = {
 
 const launch: PlayerLaunch = {
   nonce: 'play-1',
+  serverId: 'server-1',
+  connection: {
+    serverId: 'server-1',
+    userId: 'user-1',
+    lastConnectedAt: '2026-07-22T00:00:00.000Z',
+  },
   plan,
   context: {
     serverUrl: 'https://media.test',
@@ -39,9 +46,51 @@ const launch: PlayerLaunch = {
   display: { title: 'Test Movie' },
 };
 
+function linkFor(value: PlayerLaunch): string {
+  const display = value.display;
+  const title =
+    display.seriesName !== undefined &&
+    display.seasonNumber !== undefined &&
+    display.episodeNumber !== undefined
+      ? `${display.seriesName} — S${String(display.seasonNumber).padStart(2, '0')}E${String(display.episodeNumber).padStart(2, '0')} — ${display.title}`
+      : display.title;
+  return createJellyfinMediaLink({
+    serverId: value.serverId,
+    itemId: value.plan.itemId,
+    title,
+  });
+}
+
+function referenceFor(value: PlayerLaunch): string {
+  const display = value.display;
+  const title =
+    display.seriesName !== undefined &&
+    display.seasonNumber !== undefined &&
+    display.episodeNumber !== undefined
+      ? `${display.seriesName} — S${String(display.seasonNumber).padStart(2, '0')}E${String(display.episodeNumber).padStart(2, '0')} — ${display.title}`
+      : display.title;
+  const reference = createJellyfinMediaReference({
+    serverId: value.serverId,
+    itemId: value.plan.itemId,
+    title,
+  });
+  return `/private/plugin-data/${reference.dataPath.slice('@data/'.length)}`;
+}
+
+function referenceDataPathFor(value: PlayerLaunch): string {
+  const filename = referenceFor(value).slice('/private/plugin-data/'.length);
+  return `@data/${filename}`;
+}
+
 function createRuntime() {
   const loadTrack = vi.fn();
-  const deleteFile = vi.fn();
+  const dataRoot = '/private/plugin-data';
+  const files = new Map<string, string>();
+  const fileKey = (path: string): string =>
+    path.startsWith(`${dataRoot}/`) ? `@data/${path.slice(dataRoot.length + 1)}` : path;
+  const deleteFile = vi.fn((path: string) => {
+    files.delete(fileKey(path));
+  });
   const execute = vi.fn<
     (request: { url: string; body?: Record<string, unknown> }) => Promise<unknown>
   >(async () => ({}));
@@ -56,14 +105,46 @@ function createRuntime() {
       subtitle: { loadTrack },
     },
     file: {
-      exists: vi.fn(() => true),
+      exists: vi.fn((path: string) =>
+        path.startsWith('@data/') || path.startsWith(`${dataRoot}/`)
+          ? files.has(fileKey(path))
+          : true,
+      ),
       delete: deleteFile,
-      write: vi.fn(),
-      handle: vi.fn(() => ({
-        seekToEnd: vi.fn(),
-        offset: vi.fn(() => 100),
-        close: vi.fn(),
-      })),
+      write: vi.fn((path: string, content: string) => {
+        files.set(fileKey(path), content);
+      }),
+      read: vi.fn((path: string) => files.get(fileKey(path))),
+      handle: vi.fn((path: string) => {
+        const content = files.get(fileKey(path));
+        if (content === undefined) {
+          if (path.startsWith('@data/') || path.startsWith(`${dataRoot}/`)) return null;
+          return {
+            read: vi.fn(() => new Uint8Array()),
+            seekTo: vi.fn(),
+            seekToEnd: vi.fn(),
+            offset: vi.fn(() => 100),
+            close: vi.fn(),
+          };
+        }
+        const bytes = new TextEncoder().encode(content);
+        let offset = 0;
+        return {
+          read: vi.fn((length: number) => {
+            const result = bytes.slice(offset, offset + length);
+            offset += result.length;
+            return result;
+          }),
+          seekTo: vi.fn((nextOffset: number) => {
+            offset = nextOffset;
+          }),
+          seekToEnd: vi.fn(() => {
+            offset = bytes.length;
+          }),
+          offset: vi.fn(() => offset),
+          close: vi.fn(),
+        };
+      }),
     },
     global: {
       getLabel: vi.fn(() => launch.nonce),
@@ -77,7 +158,7 @@ function createRuntime() {
       getNumber: vi.fn((name: string): number =>
         name === 'duration' ? 60 : name === 'speed' ? 1 : 0,
       ),
-      getFlag: vi.fn(() => false),
+      getFlag: vi.fn<(name: string) => boolean>(() => false),
       getNative: vi.fn(() => []),
       set: vi.fn(),
       command: vi.fn(),
@@ -92,7 +173,29 @@ function createRuntime() {
       show: vi.fn(),
       setClickable: vi.fn(),
     },
-    utils: { resolvePath: vi.fn(() => '/private/tmp/jellyfin-subtitle.srt') },
+    playlist: {
+      list: vi.fn<() => IINA.PlaylistItem[]>(() => []),
+      count: vi.fn(() => 0),
+      add: vi.fn(),
+      remove: vi.fn(),
+      move: vi.fn(),
+      play: vi.fn(),
+      playNext: vi.fn(),
+      playPrevious: vi.fn(),
+      registerMenuBuilder: vi.fn(),
+    },
+    utils: {
+      resolvePath: vi.fn((path: string) => {
+        if (path === '@data/' || path === '@data') return dataRoot;
+        if (path.startsWith('@data/')) return `${dataRoot}/${path.slice('@data/'.length)}`;
+        if (path.startsWith('@tmp/jellyfin-playlist-')) {
+          return `/private/tmp/${path.slice('@tmp/'.length)}`;
+        }
+        return '/private/tmp/jellyfin-subtitle.srt';
+      }),
+      keychainRead: vi.fn(),
+      keychainWrite: vi.fn(),
+    },
   };
   const transport = {
     execute,
@@ -108,6 +211,7 @@ function createRuntime() {
     logger,
     loadTrack,
     deleteFile,
+    files,
   };
 }
 
@@ -983,17 +1087,17 @@ describe('player runtime boundaries', () => {
     }
   });
 
-  it('opens only mpv null and installs the authenticated stream from on_load', async () => {
+  it('opens only a credential-free media link and installs the authenticated stream from on_load', async () => {
     const { runtime, api } = createRuntime();
     const internals = runtime as unknown as {
       receiveLaunch(value: unknown): void;
       progressTimer: ReturnType<typeof setInterval>;
     };
     runtime.install();
-    api.mpv.getString.mockReturnValue('null://');
+    api.mpv.getString.mockReturnValue(linkFor(launch));
 
     internals.receiveLaunch(launch);
-    await vi.waitFor(() => expect(api.core.open).toHaveBeenCalledWith('null://'));
+    await vi.waitFor(() => expect(api.core.open).toHaveBeenCalledWith(referenceFor(launch)));
     const next = vi.fn();
     const registered = api.mpv.addHook.mock.calls.find(([name]) => name === 'on_load');
     const hook = registered?.[2] as ((next: () => void) => Promise<void>) | undefined;
@@ -1003,7 +1107,7 @@ describe('player runtime boundaries', () => {
     await pendingHook;
 
     expect(api.core.open).not.toHaveBeenCalledWith(plan.url);
-    expect(api.mpv.command).not.toHaveBeenCalledWith('loadfile', ['null://', 'replace']);
+    expect(api.mpv.command).not.toHaveBeenCalledWith('loadfile', [linkFor(launch), 'replace']);
     expect(api.mpv.set).toHaveBeenCalledWith('file-local-options/resume-playback', false);
     expect(api.mpv.set).toHaveBeenCalledWith('file-local-options/save-position-on-quit', false);
     expect(api.mpv.set).toHaveBeenCalledWith('file-local-options/start', 0);
@@ -1011,7 +1115,10 @@ describe('player runtime boundaries', () => {
       'Authorization: MediaBrowser Token="secret"',
     ]);
     expect(api.mpv.set).toHaveBeenCalledWith('stream-open-filename', plan.url);
-    expect(JSON.parse(api.file.write.mock.calls[0]?.[1] as string)).toMatchObject({
+    const playbackState = api.file.write.mock.calls.find(([path]) =>
+      String(path).startsWith('@tmp/jellyfin-playback-state-'),
+    )?.[1] as string;
+    expect(JSON.parse(playbackState)).toMatchObject({
       playbackId: launch.nonce,
       status: 'preparing',
     });
@@ -1025,6 +1132,633 @@ describe('player runtime boundaries', () => {
     expect(streamUrlIndex).toBeGreaterThan(resumeOptionIndex);
     expect(next).toHaveBeenCalledOnce();
     clearInterval(internals.progressTimer);
+  });
+
+  it('places credential-free past and future episodes around the current item', async () => {
+    const { runtime, api, transport } = createRuntime();
+    const episodeLaunch: PlayerLaunch = {
+      ...launch,
+      plan: { ...plan, itemId: 'item-2' },
+      display: {
+        title: 'Two',
+        seriesName: 'Test Show',
+        seriesId: 'series-1',
+        seasonId: 'season-1',
+        seasonNumber: 1,
+        episodeNumber: 2,
+      },
+    };
+    seedSession(runtime, 'playing');
+    const internals = runtime as unknown as {
+      launch: PlayerLaunch;
+      session: PlaybackSessionState;
+      ownedPlaylistLinks: Set<string>;
+      refreshNativePlaylist(next: PlayerLaunch, generation: number): Promise<void>;
+    };
+    internals.launch = episodeLaunch;
+    const currentLink = linkFor(episodeLaunch);
+    const oldLink = createJellyfinMediaLink({
+      serverId: launch.serverId,
+      itemId: 'old',
+      title: 'Old queue item',
+    });
+    internals.ownedPlaylistLinks.add(oldLink);
+    const entries: IINA.PlaylistItem[] = [
+      { filename: currentLink, title: null, isPlaying: true, isCurrent: true },
+      {
+        filename: 'file:///Users/test/Videos/personal.mp4',
+        title: null,
+        isPlaying: false,
+        isCurrent: false,
+      },
+      { filename: oldLink, title: null, isPlaying: false, isCurrent: false },
+    ];
+    api.playlist.list.mockImplementation(() => entries);
+    api.playlist.remove.mockImplementation((index: number) => {
+      entries.splice(index, 1);
+      return true;
+    });
+    transport.execute.mockResolvedValueOnce({
+      Items: [
+        {
+          Id: 'item-1',
+          Name: 'One',
+          Type: 'Episode',
+          SeriesName: 'Test Show',
+          ParentIndexNumber: 1,
+          IndexNumber: 1,
+          LocationType: 'FileSystem',
+        },
+        {
+          Id: 'item-2',
+          Name: 'Two',
+          Type: 'Episode',
+          SeriesName: 'Test Show',
+          ParentIndexNumber: 1,
+          IndexNumber: 2,
+          LocationType: 'FileSystem',
+        },
+        {
+          Id: 'item-3',
+          Name: 'Three',
+          Type: 'Episode',
+          SeriesName: 'Test Show',
+          ParentIndexNumber: 1,
+          IndexNumber: 3,
+          LocationType: 'FileSystem',
+        },
+      ],
+      TotalRecordCount: 3,
+      StartIndex: 0,
+    });
+
+    await internals.refreshNativePlaylist(episodeLaunch, internals.session.generation);
+
+    expect(entries.map((entry) => entry.filename)).toEqual([
+      currentLink,
+      'file:///Users/test/Videos/personal.mp4',
+    ]);
+    const pastReference = createJellyfinMediaReference({
+      serverId: launch.serverId,
+      itemId: 'item-1',
+      title: 'Test Show — S01E01 — One',
+    });
+    const futureReference = createJellyfinMediaReference({
+      serverId: launch.serverId,
+      itemId: 'item-3',
+      title: 'Test Show — S01E03 — Three',
+    });
+    const pastLink = `/private/plugin-data/${pastReference.dataPath.slice('@data/'.length)}`;
+    const futureLink = `/private/plugin-data/${futureReference.dataPath.slice('@data/'.length)}`;
+    expect(api.file.write).toHaveBeenCalledWith(
+      '@tmp/jellyfin-playlist-play-1-1-1.m3u8',
+      `#EXTM3U\n#EXTINF:-1,Test Show — S01E01 — One\n${pastLink}\n#EXTINF:-1,Test Show — S01E03 — Three\n${futureLink}\n`,
+    );
+    expect(api.mpv.command).toHaveBeenCalledWith('loadlist', [
+      '/private/tmp/jellyfin-playlist-play-1-1-1.m3u8',
+      'insert-at',
+      '0',
+    ]);
+    expect(api.mpv.command).toHaveBeenCalledWith('playlist-move', ['2', '1']);
+    expect(internals.ownedPlaylistLinks).toEqual(new Set([pastLink, futureLink]));
+    const playlistDocument = api.file.write.mock.calls.find(([path]) =>
+      String(path).startsWith('@tmp/jellyfin-playlist-'),
+    )?.[1] as string;
+    expect(playlistDocument).not.toContain('secret');
+    expect(playlistDocument).not.toContain(plan.url);
+    expect(api.file.delete).toHaveBeenCalledWith('@tmp/jellyfin-playlist-play-1-1-1.m3u8');
+    expect(api.mpv.set).toHaveBeenCalledWith('file-local-options/keep-open', 'always');
+  });
+
+  it('paginates a large season until it finds the current and following episode', async () => {
+    const { runtime, api, transport } = createRuntime();
+    const episodeLaunch: PlayerLaunch = {
+      ...launch,
+      plan: { ...plan, itemId: 'e201' },
+      display: {
+        title: 'Episode 201',
+        seriesName: 'Long Show',
+        seriesId: 'long-series',
+        seasonId: 'long-season',
+        seasonNumber: 1,
+        episodeNumber: 201,
+      },
+    };
+    seedSession(runtime, 'playing');
+    const internals = runtime as unknown as {
+      launch: PlayerLaunch;
+      session: PlaybackSessionState;
+      refreshNativePlaylist(next: PlayerLaunch, generation: number): Promise<void>;
+    };
+    internals.launch = episodeLaunch;
+    const entries: IINA.PlaylistItem[] = [
+      { filename: linkFor(episodeLaunch), title: null, isPlaying: true, isCurrent: true },
+    ];
+    api.playlist.list.mockImplementation(() => entries);
+    transport.execute
+      .mockResolvedValueOnce({
+        Items: Array.from({ length: 200 }, (_, index) => ({
+          Id: `e${index + 1}`,
+          Name: `Episode ${index + 1}`,
+          Type: 'Episode',
+          SeriesName: 'Long Show',
+          ParentIndexNumber: 1,
+          IndexNumber: index + 1,
+          LocationType: 'FileSystem',
+        })),
+        TotalRecordCount: 202,
+        StartIndex: 0,
+      })
+      .mockResolvedValueOnce({
+        Items: [
+          {
+            Id: 'e201',
+            Name: 'Episode 201',
+            Type: 'Episode',
+            ParentIndexNumber: 1,
+            IndexNumber: 201,
+            LocationType: 'FileSystem',
+          },
+          {
+            Id: 'e202',
+            Name: 'Episode 202',
+            Type: 'Episode',
+            SeriesName: 'Long Show',
+            ParentIndexNumber: 1,
+            IndexNumber: 202,
+            LocationType: 'FileSystem',
+          },
+        ],
+        TotalRecordCount: 202,
+        StartIndex: 200,
+      });
+
+    await internals.refreshNativePlaylist(episodeLaunch, internals.session.generation);
+
+    expect(transport.execute).toHaveBeenCalledTimes(2);
+    const queuedReference = createJellyfinMediaReference({
+      serverId: launch.serverId,
+      itemId: 'e202',
+      title: 'Long Show — S01E202 — Episode 202',
+    });
+    const queuedLink = `/private/plugin-data/${queuedReference.dataPath.slice('@data/'.length)}`;
+    const playlistDocument = api.file.write.mock.calls.find(([path]) =>
+      String(path).startsWith('@tmp/jellyfin-playlist-'),
+    )?.[1] as string;
+    expect(playlistDocument).toContain('#EXTINF:-1,Long Show — S01E101 — Episode 101');
+    expect(playlistDocument).toContain(
+      `#EXTINF:-1,Long Show — S01E202 — Episode 202\n${queuedLink}`,
+    );
+    expect(playlistDocument).not.toContain('S01E100 — Episode 100');
+    expect(api.mpv.command).toHaveBeenCalledWith('loadlist', [
+      '/private/tmp/jellyfin-playlist-play-1-1-1.m3u8',
+      'insert-at',
+      '0',
+    ]);
+    expect(api.mpv.command).toHaveBeenCalledWith('playlist-move', ['101', '100']);
+  });
+
+  it('persists a queued history marker only when that playlist item is selected', () => {
+    const { runtime, files } = createRuntime();
+    const media = {
+      serverId: launch.serverId,
+      itemId: 'queued-item',
+      title: 'Test Show — S01E02 — Queued',
+    };
+    const marker = createJellyfinMediaReference(media);
+    const internals = runtime as unknown as {
+      reserveMediaReference(input: typeof media): string;
+      parseMediaReference(value: unknown): typeof media | undefined;
+    };
+
+    const location = internals.reserveMediaReference(media);
+    expect(files.has(marker.dataPath)).toBe(false);
+
+    expect(internals.parseMediaReference(location)).toEqual(media);
+    expect(files.get(marker.dataPath)).toBe(marker.document);
+  });
+
+  it('rolls back lazy marker reservations when playlist construction fails', async () => {
+    const { runtime, api, transport, files } = createRuntime();
+    const episodeLaunch: PlayerLaunch = {
+      ...launch,
+      display: {
+        title: 'One',
+        seriesName: 'Test Show',
+        seriesId: 'series-1',
+        seasonId: 'season-1',
+        seasonNumber: 1,
+        episodeNumber: 1,
+      },
+    };
+    seedSession(runtime, 'playing');
+    const internals = runtime as unknown as {
+      launch: PlayerLaunch;
+      session: PlaybackSessionState;
+      queuedMediaReferences: Map<string, unknown>;
+      refreshNativePlaylist(next: PlayerLaunch, generation: number): Promise<void>;
+    };
+    internals.launch = episodeLaunch;
+    api.file.exists.mockImplementation((path: string) => {
+      if (path.includes('Three')) throw new Error('simulated reservation failure');
+      return path.startsWith('@data/') ? files.has(path) : true;
+    });
+    transport.execute.mockResolvedValueOnce({
+      Items: [
+        {
+          Id: 'item-1',
+          Name: 'One',
+          Type: 'Episode',
+          ParentIndexNumber: 1,
+          IndexNumber: 1,
+          LocationType: 'FileSystem',
+        },
+        {
+          Id: 'item-2',
+          Name: 'Two',
+          Type: 'Episode',
+          SeriesName: 'Test Show',
+          ParentIndexNumber: 1,
+          IndexNumber: 2,
+          LocationType: 'FileSystem',
+        },
+        {
+          Id: 'item-3',
+          Name: 'Three',
+          Type: 'Episode',
+          SeriesName: 'Test Show',
+          ParentIndexNumber: 1,
+          IndexNumber: 3,
+          LocationType: 'FileSystem',
+        },
+      ],
+      TotalRecordCount: 3,
+      StartIndex: 0,
+    });
+
+    await internals.refreshNativePlaylist(episodeLaunch, internals.session.generation);
+
+    expect(internals.queuedMediaReferences.size).toBe(0);
+    expect(api.mpv.command).not.toHaveBeenCalledWith('loadlist', expect.anything());
+  });
+
+  it('rejects oversized and out-of-scope marker files with bounded reads', () => {
+    const { runtime, api, files } = createRuntime();
+    const media = {
+      serverId: launch.serverId,
+      itemId: 'oversized-item',
+      title: 'Oversized marker',
+    };
+    const marker = createJellyfinMediaReference(media);
+    const location = `/private/plugin-data/${marker.dataPath.slice('@data/'.length)}`;
+    files.set(marker.dataPath, 'a'.repeat(4_097));
+    const internals = runtime as unknown as {
+      parseMediaReference(value: unknown): typeof media | undefined;
+    };
+
+    expect(internals.parseMediaReference(location)).toBeUndefined();
+    expect(api.file.handle).toHaveBeenCalledWith(location, 'read');
+    api.file.handle.mockClear();
+    expect(internals.parseMediaReference('/Users/test/Videos/private-file')).toBeUndefined();
+    expect(api.file.handle).not.toHaveBeenCalled();
+  });
+
+  it('reopens a persisted Jellyfin history link with fresh Keychain credentials', async () => {
+    const { runtime, api, transport } = createRuntime();
+    const connection = {
+      schemaVersion: 1,
+      serverUrl: 'https://media.test',
+      serverId: 'server-1',
+      serverName: 'Test Server',
+      userId: 'user-1',
+      username: 'viewer',
+      deviceId: 'device-1-1234567890',
+      acceptedInsecureRemote: false,
+      lastConnectedAt: '2026-07-22T00:00:00.000Z',
+    };
+    api.preferences.get.mockImplementation((key: string) =>
+      key === 'connectionMetadata' ? JSON.stringify(connection) : undefined,
+    );
+    api.utils.keychainRead.mockReturnValue(
+      JSON.stringify({
+        version: 1,
+        serverUrl: connection.serverUrl,
+        serverId: connection.serverId,
+        userId: connection.userId,
+        accessToken: 'fresh-secret',
+      }),
+    );
+    const historyLink = createJellyfinMediaLink({
+      serverId: connection.serverId,
+      itemId: 'item-2',
+      title: 'Test Show — S01E02 — Two',
+    });
+    api.mpv.getString.mockReturnValue(historyLink);
+    transport.execute.mockImplementation(async (request: { url: string }) => {
+      if (request.url.includes('/PlaybackInfo')) {
+        return {
+          PlaySessionId: 'session-item-2',
+          MediaSources: [
+            {
+              Id: 'source-item-2',
+              Protocol: 'File',
+              Container: 'mkv',
+              RunTimeTicks: 600_000_000,
+              SupportsDirectPlay: true,
+              SupportsDirectStream: true,
+              SupportsTranscoding: true,
+              MediaStreams: [
+                { Index: 0, Type: 'Video', Codec: 'h264' },
+                { Index: 1, Type: 'Audio', Codec: 'aac', IsDefault: true },
+              ],
+            },
+          ],
+        };
+      }
+      return {
+        Id: 'item-2',
+        Name: 'Two',
+        Type: 'Episode',
+        LocationType: 'FileSystem',
+        RunTimeTicks: 600_000_000,
+        SeriesName: 'Test Show',
+        SeriesId: 'series-1',
+        SeasonId: 'season-1',
+        ParentIndexNumber: 1,
+        IndexNumber: 2,
+        UserData: { PlaybackPositionTicks: 120_000_000 },
+      };
+    });
+    const next = vi.fn();
+
+    await (runtime as unknown as { resolveLoad(callback?: () => void): Promise<void> }).resolveLoad(
+      next,
+    );
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(api.mpv.set).toHaveBeenCalledWith(
+      'file-local-options/force-media-title',
+      'Test Show — S01E02 — Two',
+    );
+    expect(api.mpv.set).toHaveBeenCalledWith(
+      'stream-open-filename',
+      expect.stringMatching(/^https:\/\/media\.test\/Videos\/item-2\/stream/),
+    );
+    expect(historyLink).not.toContain('fresh-secret');
+  });
+
+  it('continues native playlist playback with the retained post-EOF owner', async () => {
+    const { runtime, api } = createRuntime();
+    const nextLaunch = {
+      ...launch,
+      nonce: 'play-after-eof',
+      plan: { ...plan, itemId: 'item-2', playSessionId: 'session-item-2' },
+    };
+    const link = linkFor(nextLaunch);
+    api.mpv.getString.mockReturnValue(link);
+    const internals = runtime as unknown as {
+      globalPlaybackId?: string;
+      prepareLinkedLaunch(): Promise<PlayerLaunch>;
+      resolveLoad(next?: () => void): Promise<void>;
+    };
+    internals.globalPlaybackId = launch.nonce;
+    internals.prepareLinkedLaunch = vi.fn(async () => nextLaunch);
+
+    await internals.resolveLoad();
+
+    expect(api.global.postMessage).toHaveBeenCalledWith('jellyfin.player.linked-launch', {
+      playbackId: nextLaunch.nonce,
+      previousPlaybackId: launch.nonce,
+      connection: nextLaunch.connection,
+    });
+  });
+
+  it('rejects a History reopen if the saved connection changes while it is loading', async () => {
+    const { runtime, api, transport } = createRuntime();
+    const connection = {
+      schemaVersion: 1,
+      serverUrl: 'https://media.test',
+      serverId: 'server-1',
+      serverName: 'Test Server',
+      userId: 'user-1',
+      username: 'viewer',
+      deviceId: 'device-1-1234567890',
+      acceptedInsecureRemote: false,
+      lastConnectedAt: '2026-07-22T00:00:00.000Z',
+    };
+    let savedConnection: typeof connection | undefined = connection;
+    api.preferences.get.mockImplementation((key: string) =>
+      key === 'connectionMetadata' && savedConnection !== undefined
+        ? JSON.stringify(savedConnection)
+        : undefined,
+    );
+    api.utils.keychainRead.mockReturnValue(
+      JSON.stringify({
+        version: 1,
+        serverUrl: connection.serverUrl,
+        serverId: connection.serverId,
+        userId: connection.userId,
+        accessToken: 'old-secret',
+      }),
+    );
+    const linked = createJellyfinMediaLink({
+      serverId: connection.serverId,
+      itemId: 'slow-item',
+      title: 'Slow item',
+    });
+    api.mpv.getString.mockReturnValue(linked);
+    let releaseDetails: ((value: unknown) => void) | undefined;
+    transport.execute.mockImplementationOnce(
+      () => new Promise<unknown>((resolve) => (releaseDetails = resolve)),
+    );
+
+    const pending = (
+      runtime as unknown as { resolveLoad(next?: () => void): Promise<void> }
+    ).resolveLoad();
+    await vi.waitFor(() => expect(transport.execute).toHaveBeenCalledOnce());
+    savedConnection = {
+      ...connection,
+      userId: 'user-2',
+      username: 'other-viewer',
+      lastConnectedAt: '2026-07-22T01:00:00.000Z',
+    };
+    releaseDetails?.({
+      Id: 'slow-item',
+      Name: 'Slow item',
+      Type: 'Movie',
+      LocationType: 'FileSystem',
+    });
+    await pending;
+
+    expect(api.global.postMessage).not.toHaveBeenCalledWith(
+      'jellyfin.player.linked-launch',
+      expect.anything(),
+    );
+    expect(api.mpv.set).not.toHaveBeenCalledWith(
+      'stream-open-filename',
+      expect.stringContaining('/Videos/'),
+    );
+  });
+
+  it('holds a failed linked item and removes owned future episodes instead of falling through', async () => {
+    const { runtime, api } = createRuntime();
+    const selected = createJellyfinMediaLink({
+      serverId: 'missing-server',
+      itemId: 'item-2',
+      title: 'Episode Two',
+    });
+    const future = createJellyfinMediaLink({
+      serverId: 'missing-server',
+      itemId: 'item-3',
+      title: 'Episode Three',
+    });
+    const entries: IINA.PlaylistItem[] = [
+      { filename: selected, title: null, isPlaying: true, isCurrent: true },
+      { filename: future, title: null, isPlaying: false, isCurrent: false },
+    ];
+    api.mpv.getString.mockReturnValue(selected);
+    api.playlist.list.mockImplementation(() => entries);
+    api.playlist.remove.mockImplementation((index: number) => {
+      entries.splice(index, 1);
+      return true;
+    });
+    const internals = runtime as unknown as {
+      ownedPlaylistLinks: Set<string>;
+      resolveLoad(next?: () => void): Promise<void>;
+    };
+    internals.ownedPlaylistLinks.add(selected);
+    internals.ownedPlaylistLinks.add(future);
+    const next = vi.fn();
+
+    await internals.resolveLoad(next);
+
+    expect(entries.map((entry) => entry.filename)).toEqual([selected]);
+    expect(api.mpv.set).toHaveBeenCalledWith('file-local-options/keep-open', 'always');
+    expect(api.mpv.set).toHaveBeenCalledWith('stream-open-filename', 'null://');
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a stale history request scrub a newer load', async () => {
+    const { runtime, api, transport } = createRuntime();
+    const connection = {
+      schemaVersion: 1,
+      serverUrl: 'https://media.test',
+      serverId: 'server-1',
+      serverName: 'Test Server',
+      userId: 'user-1',
+      username: 'viewer',
+      deviceId: 'device-1-1234567890',
+      acceptedInsecureRemote: false,
+      lastConnectedAt: '2026-07-22T00:00:00.000Z',
+    };
+    api.preferences.get.mockImplementation((key: string) =>
+      key === 'connectionMetadata' ? JSON.stringify(connection) : undefined,
+    );
+    api.utils.keychainRead.mockReturnValue(
+      JSON.stringify({
+        version: 1,
+        serverUrl: connection.serverUrl,
+        serverId: connection.serverId,
+        userId: connection.userId,
+        accessToken: 'fresh-secret',
+      }),
+    );
+    const linked = createJellyfinMediaLink({
+      serverId: connection.serverId,
+      itemId: 'stale-item',
+      title: 'Stale item',
+    });
+    api.mpv.getString.mockReturnValue(linked);
+    let releaseDetails: ((value: unknown) => void) | undefined;
+    transport.execute.mockImplementationOnce(
+      () => new Promise<unknown>((resolve) => (releaseDetails = resolve)),
+    );
+    const internals = runtime as unknown as {
+      globalPlaybackId?: string;
+      replacementSequence: number;
+      resolveLoad(next?: () => void): Promise<void>;
+    };
+    internals.globalPlaybackId = 'play-retained-owner';
+    const pending = internals.resolveLoad();
+    await vi.waitFor(() => expect(transport.execute).toHaveBeenCalledOnce());
+    internals.replacementSequence += 1;
+    api.mpv.set.mockClear();
+    releaseDetails?.({
+      Id: 'stale-item',
+      Name: 'Stale item',
+      Type: 'Movie',
+      LocationType: 'FileSystem',
+    });
+
+    await pending;
+
+    expect(api.mpv.set).not.toHaveBeenCalledWith('http-header-fields', []);
+    expect(api.mpv.set).not.toHaveBeenCalledWith('stream-open-filename', 'null://');
+    expect(api.global.postMessage).not.toHaveBeenCalledWith('jellyfin.player.closed', {
+      playbackId: 'play-retained-owner',
+    });
+  });
+
+  it('reports a held playlist item complete only once at native EOF', async () => {
+    const { runtime, api, transport } = createRuntime();
+    seedSession(runtime, 'playing');
+    api.mpv.getFlag.mockImplementation((name: string) => name === 'eof-reached');
+    api.mpv.getNumber.mockImplementation((name: string) =>
+      name === 'time-pos' || name === 'duration' ? 60 : name === 'speed' ? 1 : 0,
+    );
+    const internals = runtime as unknown as { eofReachedChanged(): void };
+
+    internals.eofReachedChanged();
+    internals.eofReachedChanged();
+
+    await vi.waitFor(() =>
+      expect(
+        transport.execute.mock.calls.filter(([request]) =>
+          request.url.endsWith('/Sessions/Playing/Stopped'),
+        ),
+      ).toHaveLength(1),
+    );
+  });
+
+  it('prevents untracked seek-back after a held playlist item completes', () => {
+    const { runtime, api } = createRuntime();
+    seedSession(runtime, 'playing');
+    let eofReached = true;
+    api.mpv.getFlag.mockImplementation((name: string) =>
+      name === 'eof-reached' ? eofReached : false,
+    );
+    api.mpv.getNumber.mockImplementation((name: string) =>
+      name === 'time-pos' || name === 'duration' ? 60 : name === 'speed' ? 1 : 0,
+    );
+    const internals = runtime as unknown as { eofReachedChanged(): void };
+
+    internals.eofReachedChanged();
+    eofReached = false;
+    internals.eofReachedChanged();
+
+    expect(api.mpv.set).toHaveBeenCalledWith('pause', true);
+    expect(api.mpv.set).toHaveBeenCalledWith('time-pos', 60);
+    expect(api.core.osd).toHaveBeenCalledWith('Choose an episode from the playlist to continue.');
   });
 
   it('publishes a bounded secret-free playback snapshot for the standalone catalog', () => {
@@ -1165,6 +1899,24 @@ describe('player runtime boundaries', () => {
 
     expect(set).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledOnce();
+  });
+
+  it('releases global ownership when Jellyfin is replaced by unrelated media', async () => {
+    const { runtime, api } = createRuntime();
+    seedSession(runtime, 'playing');
+    api.mpv.getString.mockReturnValue('file:///Users/test/Videos/local.mkv');
+    const internals = runtime as unknown as {
+      globalPlaybackId?: string;
+      resolveLoad(next?: () => void): Promise<void>;
+    };
+    internals.globalPlaybackId = launch.nonce;
+
+    await internals.resolveLoad();
+
+    expect(api.global.postMessage).toHaveBeenCalledWith('jellyfin.player.closed', {
+      playbackId: launch.nonce,
+    });
+    expect(internals.globalPlaybackId).toBeUndefined();
   });
 
   it('always acknowledges an external load even if Jellyfin cleanup fails', async () => {
@@ -1524,13 +2276,13 @@ describe('player runtime boundaries', () => {
     await Promise.resolve();
 
     expect(api.core.open).not.toHaveBeenCalled();
-    expect(api.mpv.command).toHaveBeenCalledWith('loadfile', ['null://', 'replace']);
+    expect(api.mpv.command).toHaveBeenCalledWith('loadfile', [referenceFor(nextLaunch), 'replace']);
     expect(internals.session.status).toBe('preparing');
     expect(transport.execute).toHaveBeenCalledTimes(1);
   });
 
   it('reopens an idle managed core through IINA instead of issuing a hidden mpv load', async () => {
-    const { runtime, api } = createRuntime();
+    const { runtime, api, files } = createRuntime();
     const internals = runtime as unknown as {
       replacementSequence: number;
       replace(nextLaunch: PlayerLaunch, sequence: number): Promise<void>;
@@ -1540,8 +2292,35 @@ describe('player runtime boundaries', () => {
 
     await internals.replace(launch, 1);
 
-    expect(api.core.open).toHaveBeenCalledWith('null://');
+    expect(api.core.open).toHaveBeenCalledWith(referenceFor(launch));
+    expect(files.get(referenceDataPathFor(launch))).toBe(linkFor(launch));
+    expect(referenceFor(launch).split('/').at(-1)).toMatch(/^Test Movie · jf-[0-9a-f]{16}$/);
+    expect(files.get(referenceDataPathFor(launch))).not.toContain('secret');
     expect(api.mpv.command).not.toHaveBeenCalled();
+  });
+
+  it('uses distinct readable history filenames for simultaneous same-title items', () => {
+    const { runtime, files } = createRuntime();
+    const internals = runtime as unknown as {
+      ensureMediaReference(input: { serverId: string; itemId: string; title: string }): string;
+    };
+
+    const first = internals.ensureMediaReference({
+      serverId: launch.serverId,
+      itemId: launch.plan.itemId,
+      title: launch.display.title,
+    });
+    const second = internals.ensureMediaReference({
+      serverId: launch.serverId,
+      itemId: 'different-item',
+      title: launch.display.title,
+    });
+
+    expect(first).toMatch(/^\/private\/plugin-data\/Test Movie · jf-[0-9a-f]{16}$/);
+    expect(second).toMatch(/^\/private\/plugin-data\/Test Movie · jf-[0-9a-f]{16}$/);
+    expect(second).not.toBe(first);
+    expect(files.get(`@data/${first.split('/').at(-1)}`)).toBe(linkFor(launch));
+    expect(files.get(`@data/${second.split('/').at(-1)}`)).toContain('/different-item/');
   });
 
   it('replaces an active managed core through mpv without closing its window', async () => {
@@ -1561,8 +2340,40 @@ describe('player runtime boundaries', () => {
 
     await internals.replace(nextLaunch, 1);
 
-    expect(api.mpv.command).toHaveBeenCalledWith('loadfile', ['null://', 'replace']);
+    expect(api.mpv.command).toHaveBeenCalledWith('loadfile', [referenceFor(nextLaunch), 'replace']);
     expect(api.core.open).not.toHaveBeenCalled();
+  });
+
+  it('removes its stale native playlist entries before a catalog replacement', async () => {
+    const { runtime, api } = createRuntime();
+    seedSession(runtime, 'playing');
+    const current = linkFor(launch);
+    const stale = createJellyfinMediaLink({
+      serverId: launch.serverId,
+      itemId: 'stale-next',
+      title: 'Stale next episode',
+    });
+    const entries: IINA.PlaylistItem[] = [
+      { filename: current, title: null, isPlaying: true, isCurrent: true },
+      { filename: stale, title: null, isPlaying: false, isCurrent: false },
+    ];
+    api.playlist.list.mockImplementation(() => entries);
+    api.playlist.remove.mockImplementation((index: number) => {
+      entries.splice(index, 1);
+      return true;
+    });
+    const internals = runtime as unknown as {
+      replacementSequence: number;
+      ownedPlaylistLinks: Set<string>;
+      replace(nextLaunch: PlayerLaunch, sequence: number): Promise<void>;
+    };
+    internals.replacementSequence = 1;
+    internals.ownedPlaylistLinks.add(stale);
+
+    await internals.replace({ ...launch, nonce: 'replacement' }, 1);
+
+    expect(entries.map((entry) => entry.filename)).toEqual([current]);
+    expect(internals.ownedPlaylistLinks.size).toBe(0);
   });
 
   it('uses mpv for a superseding launch while the managed core is still non-idle', async () => {
@@ -1576,7 +2387,7 @@ describe('player runtime boundaries', () => {
 
     await internals.replace({ ...launch, nonce: 'latest-play' }, 2);
 
-    expect(api.mpv.command).toHaveBeenCalledWith('loadfile', ['null://', 'replace']);
+    expect(api.mpv.command).toHaveBeenCalledWith('loadfile', [referenceFor(launch), 'replace']);
     expect(api.core.open).not.toHaveBeenCalled();
   });
 
@@ -1584,7 +2395,6 @@ describe('player runtime boundaries', () => {
     const { runtime, api, transport } = createRuntime();
     seedSession(runtime, 'playing');
     api.core.status.idle = false;
-    api.mpv.getString.mockReturnValue('null://');
     const nextPlan = {
       ...plan,
       itemId: 'item-2',
@@ -1602,6 +2412,7 @@ describe('player runtime boundaries', () => {
     internals.replacementSequence = 1;
 
     await internals.replace(nextLaunch, 1);
+    api.mpv.getString.mockReturnValue(linkFor(nextLaunch));
     await internals.resolveLoad();
     await internals.mediaLoaded();
     await internals.reportQueue;
@@ -1627,7 +2438,6 @@ describe('player runtime boundaries', () => {
     transport.download.mockImplementationOnce(
       () => new Promise<void>((resolve) => (finishDownload = resolve)),
     );
-    api.mpv.getString.mockReturnValue('null://');
     const internals = runtime as unknown as {
       resolveLoad(next?: () => void): Promise<void>;
       receiveLaunch(value: unknown): void;
@@ -1638,7 +2448,10 @@ describe('player runtime boundaries', () => {
     const next = vi.fn();
 
     internals.receiveLaunch(subtitleLaunch);
-    await vi.waitFor(() => expect(api.core.open).toHaveBeenCalledWith('null://'));
+    api.mpv.getString.mockReturnValue(linkFor(subtitleLaunch));
+    await vi.waitFor(() =>
+      expect(api.core.open).toHaveBeenCalledWith(referenceFor(subtitleLaunch)),
+    );
     const pending = internals.resolveLoad(next);
     await vi.waitFor(() => expect(transport.download).toHaveBeenCalledOnce());
     internals.invalidatePendingLoads();
@@ -1782,11 +2595,16 @@ describe('player runtime boundaries', () => {
       pendingLaunchesForHook: Array<{
         launch: PlayerLaunch;
         replacementSequence: number;
+        mediaLink: string;
       }>;
       replacementSequence: number;
       resolveLoad(next?: () => void): Promise<void>;
     };
-    internals.pendingLaunchesForHook.push({ launch, replacementSequence: 1 });
+    internals.pendingLaunchesForHook.push({
+      launch,
+      replacementSequence: 1,
+      mediaLink: linkFor(launch),
+    });
     internals.replacementSequence = 2;
 
     await internals.resolveLoad(next);
@@ -1796,9 +2614,78 @@ describe('player runtime boundaries', () => {
     expect(api.mpv.set).not.toHaveBeenCalledWith('stream-open-filename', plan.url);
   });
 
-  it('discards stale null handoffs until it finds the current launch', async () => {
+  it('never reclassifies a superseded plugin handoff as a History reopen', async () => {
+    const { runtime, api, transport } = createRuntime();
+    const staleLaunch = { ...launch, nonce: 'stale-launch' };
+    const currentLaunch = {
+      ...launch,
+      nonce: 'current-launch',
+      plan: { ...plan, itemId: 'current-item', playSessionId: 'current-session' },
+    };
+    const staleLink = linkFor(staleLaunch);
+    api.mpv.getString.mockReturnValue(staleLink);
+    const internals = runtime as unknown as {
+      pendingLaunchesForHook: Array<{
+        launch: PlayerLaunch;
+        replacementSequence: number;
+        mediaLink: string;
+      }>;
+      receiveLaunch(value: unknown): void;
+      resolveLoad(next?: () => void): Promise<void>;
+      controlQueue: Promise<void>;
+    };
+    internals.pendingLaunchesForHook.push({
+      launch: staleLaunch,
+      replacementSequence: 1,
+      mediaLink: staleLink,
+    });
+
+    internals.receiveLaunch(currentLaunch);
+    await internals.resolveLoad();
+    await internals.controlQueue;
+
+    expect(transport.execute).not.toHaveBeenCalled();
+    expect(api.global.postMessage).not.toHaveBeenCalledWith(
+      'jellyfin.player.linked-launch',
+      expect.anything(),
+    );
+  });
+
+  it('allows an explicit History reopen after a stale handoff tombstone expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, api } = createRuntime();
+      const staleLink = linkFor(launch);
+      api.mpv.getString.mockReturnValue(staleLink);
+      const internals = runtime as unknown as {
+        pendingLaunchesForHook: Array<{
+          launch: PlayerLaunch;
+          replacementSequence: number;
+          mediaLink: string;
+        }>;
+        discardPendingHandoffs(): void;
+        prepareLinkedLaunch(): Promise<PlayerLaunch>;
+        resolveLoad(next?: () => void): Promise<void>;
+      };
+      internals.pendingLaunchesForHook.push({
+        launch,
+        replacementSequence: 1,
+        mediaLink: staleLink,
+      });
+      internals.discardPendingHandoffs();
+      vi.advanceTimersByTime(5_001);
+      internals.prepareLinkedLaunch = vi.fn(async () => launch);
+
+      await internals.resolveLoad();
+
+      expect(internals.prepareLinkedLaunch).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('matches the current credential-free handoff without consuming stale launches', async () => {
     const { runtime, api } = createRuntime();
-    api.mpv.getString.mockReturnValue('null://');
     const next = vi.fn();
     const currentPlan = {
       ...plan,
@@ -1821,13 +2708,15 @@ describe('player runtime boundaries', () => {
       pendingLaunchesForHook: Array<{
         launch: PlayerLaunch;
         replacementSequence: number;
+        mediaLink: string;
       }>;
       replacementSequence: number;
       resolveLoad(next?: () => void): Promise<void>;
     };
+    api.mpv.getString.mockReturnValue(linkFor(currentLaunch));
     internals.pendingLaunchesForHook.push(
-      { launch, replacementSequence: 1 },
-      { launch: currentLaunch, replacementSequence: 2 },
+      { launch, replacementSequence: 1, mediaLink: linkFor(launch) },
+      { launch: currentLaunch, replacementSequence: 2, mediaLink: linkFor(currentLaunch) },
     );
     internals.replacementSequence = 2;
 
@@ -1868,8 +2757,10 @@ describe('player runtime boundaries', () => {
         pendingLaunchesForHook: Array<{
           launch: PlayerLaunch;
           replacementSequence: number;
+          mediaLink: string;
         }>;
         progressTimer: ReturnType<typeof setInterval>;
+        globalPlaybackId?: string;
       };
       runtime.install();
       const stopHandler = api.global.onMessage.mock.calls.find(
@@ -1879,17 +2770,122 @@ describe('player runtime boundaries', () => {
         ([name]) => name === 'iina.window-will-close',
       )?.[1] as (() => void) | undefined;
 
-      internals.pendingLaunchesForHook.push({ launch, replacementSequence: 1 });
+      internals.pendingLaunchesForHook.push({
+        launch,
+        replacementSequence: 1,
+        mediaLink: linkFor(launch),
+      });
       stopHandler?.({ reason: 'user' });
       expect(internals.pendingLaunchesForHook).toHaveLength(0);
 
-      internals.pendingLaunchesForHook.push({ launch, replacementSequence: 2 });
+      internals.pendingLaunchesForHook.push({
+        launch,
+        replacementSequence: 2,
+        mediaLink: linkFor(launch),
+      });
+      internals.globalPlaybackId = launch.nonce;
       closeHandler?.();
       expect(internals.pendingLaunchesForHook).toHaveLength(0);
+      expect(api.global.postMessage).toHaveBeenCalledWith('jellyfin.player.closed', {
+        playbackId: launch.nonce,
+      });
       clearInterval(internals.progressTimer);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not mutate the native playlist after IINA begins closing mpv', async () => {
+    const { runtime, api } = createRuntime();
+    seedSession(runtime, 'playing');
+    const queued = createJellyfinMediaLink({
+      serverId: launch.serverId,
+      itemId: 'queued-on-close',
+      title: 'Queued on close',
+    });
+    const internals = runtime as unknown as {
+      controlQueue: Promise<void>;
+      ownedPlaylistLinks: Set<string>;
+      queuedMediaReferences: Map<string, unknown>;
+    };
+    internals.ownedPlaylistLinks.add(queued);
+    internals.queuedMediaReferences.set(queued, {});
+    runtime.install();
+    const closeHandler = api.event.on.mock.calls.find(
+      ([name]) => name === 'iina.window-will-close',
+    )?.[1] as (() => void) | undefined;
+
+    closeHandler?.();
+    await internals.controlQueue;
+
+    expect(api.playlist.list).not.toHaveBeenCalled();
+    expect(api.playlist.remove).not.toHaveBeenCalled();
+    expect(internals.ownedPlaylistLinks.size).toBe(0);
+    expect(internals.queuedMediaReferences.size).toBe(0);
+  });
+
+  it('ignores an in-flight playlist response after IINA begins closing mpv', async () => {
+    const { runtime, api, transport } = createRuntime();
+    const episodeLaunch: PlayerLaunch = {
+      ...launch,
+      display: {
+        title: 'One',
+        seriesName: 'Test Show',
+        seriesId: 'series-1',
+        seasonId: 'season-1',
+        seasonNumber: 1,
+        episodeNumber: 1,
+      },
+    };
+    seedSession(runtime, 'playing');
+    const internals = runtime as unknown as {
+      controlQueue: Promise<void>;
+      launch: PlayerLaunch;
+      session: PlaybackSessionState;
+      refreshNativePlaylist(next: PlayerLaunch, generation: number): Promise<void>;
+    };
+    internals.launch = episodeLaunch;
+    runtime.install();
+    let resolveEpisodes: ((value: unknown) => void) | undefined;
+    transport.execute.mockImplementationOnce(
+      () => new Promise<unknown>((resolve) => (resolveEpisodes = resolve)),
+    );
+    const refresh = internals.refreshNativePlaylist(episodeLaunch, internals.session.generation);
+    await vi.waitFor(() => expect(transport.execute).toHaveBeenCalledOnce());
+    const closeHandler = api.event.on.mock.calls.find(
+      ([name]) => name === 'iina.window-will-close',
+    )?.[1] as (() => void) | undefined;
+
+    closeHandler?.();
+    resolveEpisodes?.({
+      Items: [
+        {
+          Id: 'item-1',
+          Name: 'One',
+          Type: 'Episode',
+          ParentIndexNumber: 1,
+          IndexNumber: 1,
+          LocationType: 'FileSystem',
+        },
+        {
+          Id: 'item-2',
+          Name: 'Two',
+          Type: 'Episode',
+          ParentIndexNumber: 1,
+          IndexNumber: 2,
+          LocationType: 'FileSystem',
+        },
+      ],
+      TotalRecordCount: 2,
+      StartIndex: 0,
+    });
+    await refresh;
+    await internals.controlQueue;
+
+    expect(api.playlist.list).not.toHaveBeenCalled();
+    expect(api.playlist.remove).not.toHaveBeenCalled();
+    expect(api.mpv.command).not.toHaveBeenCalledWith('loadlist', expect.anything());
+    expect(api.mpv.command).not.toHaveBeenCalledWith('playlist-move', expect.anything());
   });
 
   it('restarts periodic reporting when a retained player receives a launch after close', async () => {

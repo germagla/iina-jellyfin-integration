@@ -21,6 +21,7 @@ import { GridScreen, HomeScreen, SearchScreen } from '../src/catalog/LibraryScre
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   document.documentElement.scrollTop = 0;
   document.body.scrollTop = 0;
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
@@ -165,6 +166,50 @@ class LongHomeBridge extends MockBridge {
             Type: 'Movie',
           })),
           TotalRecordCount: 20,
+          StartIndex: 0,
+        } as BridgeResultMap[K];
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class RecentlyAddedEpisodesBridge extends MockBridge {
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      if (query.kind === 'home' && query.shelf === 'recentlyAdded') {
+        await super.request(operation, payload);
+        return {
+          Items: [
+            {
+              Id: 'example-show',
+              Name: 'Example Show',
+              Type: 'Series',
+            },
+            {
+              Id: 'episode-3',
+              Name: 'Third',
+              Type: 'Episode',
+              SeriesId: 'example-show',
+              SeriesName: 'Example Show',
+              ParentIndexNumber: 1,
+              IndexNumber: 3,
+            },
+            {
+              Id: 'episode-2',
+              Name: 'Second',
+              Type: 'Episode',
+              SeriesId: 'example-show',
+              SeriesName: 'Example Show',
+              ParentIndexNumber: 1,
+              IndexNumber: 2,
+            },
+          ],
+          TotalRecordCount: 3,
           StartIndex: 0,
         } as BridgeResultMap[K];
       }
@@ -322,6 +367,118 @@ class ShrinkingLibraryBridge extends MockBridge {
         TotalRecordCount: 5,
         StartIndex: query.startIndex,
       } as BridgeResultMap[K];
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class LargeLibraryBridge extends MockBridge {
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      if (query.kind === 'library') {
+        await super.request(operation, payload);
+        return {
+          Items: Array.from(
+            { length: Math.min(query.limit, Math.max(0, 135 - query.startIndex)) },
+            (_, index) => {
+              const itemNumber = query.startIndex + index + 1;
+              return {
+                Id: `large-${itemNumber}`,
+                Name: `Large title ${itemNumber}`,
+                Type: 'Movie',
+              };
+            },
+          ),
+          TotalRecordCount: 135,
+          StartIndex: query.startIndex,
+        } as BridgeResultMap[K];
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class FilteredLibraryBridge extends MockBridge {
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      if (query.kind === 'library') {
+        await super.request(operation, payload);
+        return {
+          Items: Array.from(
+            { length: Math.min(query.limit, Math.max(0, 65 - query.startIndex)) },
+            (_, index) => {
+              const itemNumber = query.startIndex + index + 1;
+              return {
+                Id:
+                  itemNumber === 11 || itemNumber === 12
+                    ? 'filtered-duplicate'
+                    : `filtered-${itemNumber}`,
+                Name: itemNumber === 10 ? '' : `Filtered title ${itemNumber}`,
+                Type: 'Movie',
+              };
+            },
+          ),
+          TotalRecordCount: 65,
+          StartIndex: query.startIndex,
+        } as BridgeResultMap[K];
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class NonAdvancingLibraryBridge extends LargeLibraryBridge {
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      if (query.kind === 'library' && query.startIndex === 60) {
+        await super.request(operation, payload);
+        return {
+          Items: [],
+          TotalRecordCount: 135,
+          StartIndex: 60,
+        } as BridgeResultMap[K];
+      }
+    }
+    return super.request(operation, payload);
+  }
+}
+
+class RefreshRaceBridge extends LargeLibraryBridge {
+  readonly libraryRequests: Array<Extract<BridgePayload<'catalog.query'>, { kind: 'library' }>> =
+    [];
+  private gate?: ReturnType<typeof deferred<void>>;
+
+  pause(): void {
+    this.gate = deferred<void>();
+  }
+
+  release(): void {
+    this.gate?.resolve();
+    this.gate = undefined;
+  }
+
+  override async request<K extends BridgeOperation>(
+    operation: K,
+    payload: BridgePayload<K>,
+  ): Promise<BridgeResultMap[K]> {
+    if (operation === 'catalog.query') {
+      const query = payload as BridgePayload<'catalog.query'>;
+      if (query.kind === 'library') {
+        this.libraryRequests.push(query);
+        await this.gate?.promise;
+      }
     }
     return super.request(operation, payload);
   }
@@ -542,6 +699,31 @@ describe('catalog journey', () => {
     expect(progress).not.toHaveAttribute('style');
   });
 
+  it('groups recently added episodes by series and labels the newest episode', async () => {
+    const bridge = new RecentlyAddedEpisodesBridge();
+    render(<HomeScreen bridge={bridge} onSelect={() => undefined} />);
+
+    const heading = await screen.findByRole('heading', { name: 'Recently Added' });
+    const section = heading.closest('section');
+    expect(section).not.toBeNull();
+    const shelf = within(section!);
+    expect(
+      shelf.getAllByRole('button', {
+        name: 'Open Example Show, 2 new episodes · Latest S1 · E3 · Third',
+      }),
+    ).toHaveLength(1);
+    expect(shelf.getByText('2 new episodes · Latest S1 · E3 · Third')).toBeInTheDocument();
+    expect(shelf.getByText('2 NEW')).toBeInTheDocument();
+    expect(
+      bridge.requests.find(
+        (request) =>
+          request.operation === 'catalog.query' &&
+          request.payload.kind === 'home' &&
+          request.payload.shelf === 'recentlyAdded',
+      )?.payload,
+    ).toMatchObject({ limit: 200 });
+  });
+
   it('shows one responsive shelf row and expands all loaded items without horizontal paging', async () => {
     let shelfWidth = 1_200;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
@@ -630,7 +812,8 @@ describe('catalog journey', () => {
 
     expect(screen.getByRole('heading', { name: 'Continue Watching' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Loading catalog')).toBeNull();
-    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    expect(view.container.querySelector('.home-screen')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.queryByText('Updating…')).toBeNull();
 
     bridge.release();
     expect(await screen.findByText(/Couldn’t refresh:/)).toBeInTheDocument();
@@ -648,7 +831,8 @@ describe('catalog journey', () => {
     view.rerender(<HomeScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
 
     expect(screen.getByText('Your library is quiet')).toBeInTheDocument();
-    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    expect(view.container.querySelector('.home-screen')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.queryByText('Updating…')).toBeNull();
     bridge.release();
 
     expect(await screen.findByText(/Couldn’t refresh:/)).toBeInTheDocument();
@@ -677,7 +861,9 @@ describe('catalog journey', () => {
       ),
     ).toBe(true);
 
+    document.documentElement.scrollTop = 900;
     await user.click(screen.getByRole('button', { name: 'Films' }));
+    expect(document.documentElement.scrollTop).toBe(0);
     expect(await screen.findByRole('heading', { name: 'Films', level: 1 })).toBeInTheDocument();
     expect(
       bridge.requests.some(
@@ -690,15 +876,15 @@ describe('catalog journey', () => {
     ).toBe(true);
   });
 
-  it('paginates and sorts a movie library', async () => {
+  it('uses one continuously scrolling grid and preserves scroll around details', async () => {
     const bridge = new MockBridge();
     const user = userEvent.setup();
     render(<CatalogApp bridge={bridge} initialConnected initialRoute="library" />);
 
     expect(await screen.findByText('The Quiet Orbit')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Next page' }));
-    expect(await screen.findByText('Windward')).toBeInTheDocument();
-    expect(screen.getByText(/Page 2 of 2/)).toBeInTheDocument();
+    expect(screen.getByText('Windward')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Next page' })).toBeNull();
+    expect(screen.queryByText(/Page \d+ of \d+/)).toBeNull();
 
     document.documentElement.scrollTop = 640;
     await user.click(screen.getByRole('button', { name: 'Open Windward' }));
@@ -706,80 +892,135 @@ describe('catalog journey', () => {
     await user.click(await screen.findByRole('button', { name: 'Back' }));
     expect(document.documentElement.scrollTop).toBe(640);
     expect(screen.getByText('Windward')).toBeInTheDocument();
-    expect(screen.getByText(/Page 2 of 2/)).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText('Sort by'), 'title');
-    await waitFor(() => expect(screen.getByText(/Page 1 of 2/)).toBeInTheDocument());
-    expect(
-      bridge.requests.some(
-        (request) =>
-          request.operation === 'catalog.query' &&
-          request.payload.kind === 'library' &&
-          request.payload.sortBy === 'SortName',
-      ),
-    ).toBe(true);
+    expect(document.documentElement.scrollTop).toBe(0);
+    await waitFor(() =>
+      expect(
+        bridge.requests.some(
+          (request) =>
+            request.operation === 'catalog.query' &&
+            request.payload.kind === 'library' &&
+            request.payload.sortBy === 'SortName',
+        ),
+      ).toBe(true),
+    );
+    expect(screen.queryByText(/Page \d+ of \d+/)).toBeNull();
   });
 
-  it('fills complete responsive library rows and anchors the visible range after resizing', async () => {
-    let gridWidth = 1_400;
-    let gridTop = 220;
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1512 });
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 982 });
-    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
-      this: HTMLElement,
-    ) {
-      return this.classList.contains('catalog-grid-region')
-        ? rect(gridWidth, gridTop, 700)
-        : rect(0);
-    });
-    const bridge = new MockBridge();
+  it('loads large libraries continuously in batches without pagination', async () => {
+    const bridge = new LargeLibraryBridge();
     const user = userEvent.setup();
     render(<CatalogApp bridge={bridge} initialConnected initialRoute="library" />);
 
-    expect(await screen.findByText(/Showing 1–16 of 24 · Page 1 of 2/)).toBeInTheDocument();
+    expect(await screen.findByText('Large title 60')).toBeInTheDocument();
     expect(
       bridge.requests
         .filter(
           (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
         )
         .at(-1)?.payload,
-    ).toMatchObject({ startIndex: 0, limit: 16 });
+    ).toMatchObject({ startIndex: 0, limit: 60 });
+    expect(screen.queryByText(/Page \d+ of \d+/)).toBeNull();
 
-    await user.click(screen.getByRole('button', { name: 'Next page' }));
-    expect(await screen.findByText(/Showing 17–24 of 24 · Page 2 of 2/)).toBeInTheDocument();
-
-    const requestCountBeforeHide = bridge.requests.filter(
-      (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
-    ).length;
-    gridWidth = 0;
-    window.dispatchEvent(new Event('resize'));
-    await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 175));
-    });
+    await user.click(screen.getByRole('button', { name: 'Load more · 75 remaining' }));
+    expect(await screen.findByText('Large title 120')).toBeInTheDocument();
     expect(
-      bridge.requests.filter(
-        (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
-      ),
-    ).toHaveLength(requestCountBeforeHide);
-    expect(screen.getByText(/Showing 17–24 of 24 · Page 2 of 2/)).toBeInTheDocument();
+      bridge.requests
+        .filter(
+          (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
+        )
+        .at(-1)?.payload,
+    ).toMatchObject({ startIndex: 60, limit: 60 });
 
-    gridWidth = 1_020;
-    gridTop = 220;
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 });
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
-    window.dispatchEvent(new Event('resize'));
+    await user.click(screen.getByRole('button', { name: 'Load more · 15 remaining' }));
+    expect(await screen.findByText('Large title 135')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Load more/ })).toBeNull();
+    expect(
+      bridge.requests
+        .filter(
+          (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
+        )
+        .at(-1)?.payload,
+    ).toMatchObject({ startIndex: 120, limit: 15 });
+  });
 
-    await waitFor(() =>
-      expect(
-        bridge.requests
-          .filter(
-            (request) =>
-              request.operation === 'catalog.query' && request.payload.kind === 'library',
-          )
-          .at(-1)?.payload,
-      ).toMatchObject({ startIndex: 12, limit: 12 }),
+  it('advances continuous loading by the Jellyfin cursor when a record is filtered out', async () => {
+    const bridge = new FilteredLibraryBridge();
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={bridge} initialConnected initialRoute="library" />);
+
+    expect(await screen.findByText('Filtered title 60')).toBeInTheDocument();
+    expect(screen.queryByText('Filtered title 10')).toBeNull();
+    expect(screen.getByText('Filtered title 11')).toBeInTheDocument();
+    expect(screen.queryByText('Filtered title 12')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Load more · 5 remaining' }));
+
+    expect(await screen.findByText('Filtered title 65')).toBeInTheDocument();
+    expect(
+      bridge.requests
+        .filter(
+          (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
+        )
+        .at(-1)?.payload,
+    ).toMatchObject({ startIndex: 60, limit: 5 });
+  });
+
+  it('stops retrying a library cursor that Jellyfin does not advance', async () => {
+    const bridge = new NonAdvancingLibraryBridge();
+    const user = userEvent.setup();
+    render(<CatalogApp bridge={bridge} initialConnected initialRoute="library" />);
+
+    expect(await screen.findByText('Large title 60')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Load more · 75 remaining' }));
+
+    expect(
+      await screen.findByText(/Jellyfin returned an incomplete library page/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Load more/ })).toBeNull();
+  });
+
+  it('does not automatically load another batch during background revalidation', async () => {
+    let observerCallback: IntersectionObserverCallback | undefined;
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          observerCallback = callback;
+        }
+        observe(): void {}
+        disconnect(): void {}
+      },
     );
-    expect(await screen.findByText(/Showing 13–24 of 24 · Page 2 of 2/)).toBeInTheDocument();
+    const bridge = new RefreshRaceBridge();
+    const library = { id: 'library-movies', name: 'Movies', kind: 'movie' } as const;
+    const view = render(
+      <GridScreen bridge={bridge} refreshKey={0} library={library} onSelect={() => undefined} />,
+    );
+
+    expect(await screen.findByText('Large title 60')).toBeInTheDocument();
+    expect(observerCallback).toBeDefined();
+    bridge.pause();
+    view.rerender(
+      <GridScreen bridge={bridge} refreshKey={1} library={library} onSelect={() => undefined} />,
+    );
+    await waitFor(() => expect(bridge.libraryRequests).toHaveLength(2));
+
+    act(() => {
+      observerCallback?.(
+        [{ isIntersecting: true } as IntersectionObserverEntry],
+        {} as IntersectionObserver,
+      );
+    });
+    expect(bridge.libraryRequests).toHaveLength(2);
+
+    bridge.release();
+    await waitFor(() =>
+      expect(view.container.querySelector('.catalog-grid-region')).toHaveAttribute(
+        'aria-busy',
+        'false',
+      ),
+    );
   });
 
   it('keeps a library page visible during a background refresh', async () => {
@@ -806,22 +1047,29 @@ describe('catalog journey', () => {
 
     expect(screen.getByText('The Quiet Orbit')).toBeInTheDocument();
     expect(screen.queryByLabelText('Loading catalog')).toBeNull();
-    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    expect(view.container.querySelector('.catalog-grid-region')).toHaveAttribute(
+      'aria-busy',
+      'true',
+    );
+    expect(screen.queryByText('Updating…')).toBeNull();
     bridge.release();
-    await waitFor(() => expect(screen.queryByText('Updating…')).toBeNull());
+    await waitFor(() =>
+      expect(view.container.querySelector('.catalog-grid-region')).toHaveAttribute(
+        'aria-busy',
+        'false',
+      ),
+    );
   });
 
-  it('clamps back to the final valid page when a library total shrinks', async () => {
+  it('reconciles a continuous library grid when its total shrinks', async () => {
     const bridge = new ShrinkingLibraryBridge();
-    const user = userEvent.setup();
     const library = { id: 'library-movies', name: 'Movies', kind: 'movie' } as const;
     const view = render(
       <GridScreen bridge={bridge} refreshKey={0} library={library} onSelect={() => undefined} />,
     );
 
     expect(await screen.findByText('The Quiet Orbit')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Next page' }));
-    expect(await screen.findByText('Windward')).toBeInTheDocument();
+    expect(screen.getByText('Windward')).toBeInTheDocument();
 
     bridge.shrink();
     view.rerender(
@@ -836,7 +1084,7 @@ describe('catalog journey', () => {
           (request) => request.operation === 'catalog.query' && request.payload.kind === 'library',
         )
         .at(-1)?.payload,
-    ).toMatchObject({ startIndex: 0, limit: 12 });
+    ).toMatchObject({ startIndex: 0, limit: 60 });
   });
 
   it('debounces search and ignores the pre-debounce interval', async () => {
@@ -887,10 +1135,16 @@ describe('catalog journey', () => {
     view.rerender(<SearchScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
 
     expect(screen.getByText('Horizons')).toBeInTheDocument();
-    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    expect(screen.queryByText('Updating…')).toBeNull();
+    await waitFor(() =>
+      expect(view.container.querySelector('.search-screen')).toHaveAttribute('aria-busy', 'true'),
+    );
+    expect(screen.queryByLabelText('Searching')).toBeNull();
     bridge.release();
 
-    await waitFor(() => expect(screen.queryByText('Updating…')).toBeNull());
+    await waitFor(() =>
+      expect(view.container.querySelector('.search-screen')).toHaveAttribute('aria-busy', 'false'),
+    );
     expect(screen.getByText('Horizons')).toBeInTheDocument();
   });
 
@@ -906,7 +1160,11 @@ describe('catalog journey', () => {
     view.rerender(<SearchScreen bridge={bridge} refreshKey={1} onSelect={() => undefined} />);
 
     expect(screen.getByText('No matches')).toBeInTheDocument();
-    expect(await screen.findByText('Updating…')).toBeInTheDocument();
+    expect(screen.queryByText('Updating…')).toBeNull();
+    await waitFor(() =>
+      expect(view.container.querySelector('.search-screen')).toHaveAttribute('aria-busy', 'true'),
+    );
+    expect(screen.queryByLabelText('Searching')).toBeNull();
     bridge.release();
 
     expect(await screen.findByText(/Couldn’t refresh:/)).toBeInTheDocument();

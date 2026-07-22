@@ -297,12 +297,16 @@ export function CatalogApp({
 
   const navigate = useCallback((destination: CatalogRoute) => {
     restoreCatalogScroll.current = false;
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
     setRoute(destination);
   }, []);
   const selectLibrary = useCallback(
     (libraryId: string) => {
       if (!libraries.some((library) => library.id === libraryId)) return;
       restoreCatalogScroll.current = false;
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
       setSelectedLibraryId(libraryId);
       setRoute('library');
     },

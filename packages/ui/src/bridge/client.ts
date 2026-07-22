@@ -397,7 +397,9 @@ function mockItemsResult(items: (MediaCard | EpisodeDetails)[], startIndex: numb
       RunTimeTicks: item.runtimeMinutes ? item.runtimeMinutes * 60 * 10_000_000 : undefined,
       ParentIndexNumber: 'seasonNumber' in item ? item.seasonNumber : undefined,
       IndexNumber: 'episodeNumber' in item ? item.episodeNumber : undefined,
-      SeriesName: item.subtitle,
+      SeriesId: 'seriesId' in item ? item.seriesId : undefined,
+      SeriesName:
+        'seriesTitle' in item && item.seriesTitle !== undefined ? item.seriesTitle : item.subtitle,
       UserData:
         item.progress === undefined && item.playbackPositionTicks === undefined
           ? undefined

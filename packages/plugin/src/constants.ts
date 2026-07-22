@@ -1,4 +1,4 @@
-export const PLUGIN_VERSION = '0.1.1';
+export const PLUGIN_VERSION = '0.2.0';
 export const KEYCHAIN_SERVICE = 'jellyfin-access-token';
 export const KEYCHAIN_ACCOUNT = 'active-connection-v1';
 export const CONNECTION_PREFERENCE_KEY = 'connectionMetadata';
@@ -14,6 +14,7 @@ export const PLAYER_MESSAGES = {
   closed: 'jellyfin.player.closed',
   diagnostic: 'jellyfin.player.diagnostic',
   launch: 'jellyfin.player.launch',
+  linkedLaunch: 'jellyfin.player.linked-launch',
   playNext: 'jellyfin.player.play-next',
   ready: 'jellyfin.player.ready',
   state: 'jellyfin.player.state',

@@ -2,6 +2,8 @@ import {
   BaseItemSchema,
   CATALOG_OPEN_REQUEST_PREFERENCE_KEY,
   CHAPTER_SKIP_MODE_PREFERENCE_KEY,
+  ItemsResultSchema,
+  PlaybackRequestSchema,
   PlaybackPlanSchema,
   beginPlaybackSession,
   buildPlaybackReportRequest,
@@ -12,6 +14,7 @@ import {
   secondsToTicks,
   shouldReportPeriodicProgress,
   ticksToSeconds,
+  type BaseItem,
   type PlaybackProgressEventName,
   type PlaybackSessionState,
   type PublicPlaybackState,
@@ -19,10 +22,24 @@ import {
 import {
   DEFAULT_PROGRESS_INTERVAL_MS,
   PLAYER_MESSAGES,
+  PLUGIN_VERSION,
   SKIP_CHAPTER_TITLES_PREFERENCE_KEY,
 } from './constants';
+import { createOpaqueId } from './ids';
 import type { IinaHttpTransport } from './iina-http';
-import type { PlayerLaunch } from './player-messages';
+import { createIinaKeychainApi } from './iina-keychain';
+import { JellyfinClient } from './jellyfin-client';
+import {
+  createJellyfinMediaReference,
+  matchesJellyfinMediaReferencePath,
+  normalizeJellyfinMediaTitle,
+  parseJellyfinMediaLink,
+  type JellyfinMediaLink,
+} from './media-link';
+import { assertPlayableMediaItem } from './media-playability';
+import { selectSeasonPlaylistEpisodes, serializeNativePlaylist } from './native-playlist';
+import { ConnectionStore } from './persistence';
+import { displayMetadataFromItem, type PlayerLaunch } from './player-messages';
 import { writePlaybackState } from './playback-state-mailbox';
 import type { SafeLogger } from './safe-logger';
 
@@ -36,6 +53,11 @@ interface PlayerApi {
   preferences: IINA.API.Preferences;
   sidebar: IINA.API.SidebarView;
   overlay: IINA.API.Overlay;
+  playlist: {
+    list(): IINA.PlaylistItem[];
+    remove(index: number): unknown;
+    play(index: number): void;
+  };
   utils: IINA.API.Utils;
 }
 
@@ -43,6 +65,13 @@ class StalePlayerLoadError extends Error {
   constructor() {
     super('A newer player load replaced this request.');
     this.name = 'StalePlayerLoadError';
+  }
+}
+
+class VideoTranscodeConfirmationRequiredError extends Error {
+  constructor() {
+    super('Video transcoding requires confirmation in the Jellyfin library.');
+    this.name = 'VideoTranscodeConfirmationRequiredError';
   }
 }
 
@@ -54,6 +83,10 @@ const CHAPTER_SKIP_FORWARD_EPSILON_SECONDS = 0.05;
 const MAX_CHAPTER_SKIP_TITLES = 32;
 const MAX_CHAPTER_TITLE_LENGTH = 128;
 const MAX_CHAPTER_SKIP_PREFERENCE_LENGTH = 4_096;
+const PLAYLIST_EPISODE_PAGE_SIZE = 200;
+const MAX_PLAYLIST_EPISODES_SCANNED = 2_000;
+const MAX_STALE_MEDIA_LINKS = 32;
+const STALE_MEDIA_LINK_TTL_MS = 5_000;
 const WEBVIEW_ERROR_CATEGORIES = new Set([
   'Error',
   'TypeError',
@@ -94,6 +127,12 @@ interface ChapterSkipTarget {
 interface PendingFinalChapterSkip {
   generation: number;
   positionTicks: number;
+}
+
+interface ReservedMediaReference {
+  dataPath: string;
+  document: string;
+  media: JellyfinMediaLink;
 }
 
 interface UpNextState {
@@ -218,12 +257,17 @@ function mediaTitle(display: PlayerLaunch['display']): string {
   return display.title;
 }
 
+function mediaLinkIdentity(value: JellyfinMediaLink | undefined): string | undefined {
+  return value === undefined ? undefined : `${value.serverId}\u0000${value.itemId}`;
+}
+
 export class PlayerRuntime {
   private session: PlaybackSessionState = createIdlePlaybackSession();
   private launch: PlayerLaunch | undefined;
   private readonly pendingLaunchesForHook: Array<{
     launch: PlayerLaunch;
     replacementSequence: number;
+    mediaLink: string;
   }> = [];
   private startedGeneration = -1;
   private positionBaseTicks = 0;
@@ -254,6 +298,13 @@ export class PlayerRuntime {
   private handledChapterKey: string | undefined;
   private unavailableChapterKey: string | undefined;
   private pendingFinalChapterSkip: PendingFinalChapterSkip | undefined;
+  private playlistRefreshSequence = 0;
+  private readonly ownedPlaylistLinks = new Set<string>();
+  private readonly queuedMediaReferences = new Map<string, ReservedMediaReference>();
+  private readonly staleOwnedMediaLinks = new Map<string, number>();
+  private eofCompletedGeneration = -1;
+  private heldCompletedPositionSeconds: number | undefined;
+  private globalPlaybackId: string | undefined;
 
   constructor(
     private readonly api: PlayerApi,
@@ -286,16 +337,23 @@ export class PlayerRuntime {
     this.api.event.on('mpv.paused-for-cache.changed', () => this.playbackTimingChanged());
     this.api.event.on('mpv.chapter.changed', () => this.reconcileChapterSkip());
     this.api.event.on('mpv.duration.changed', () => this.reconcileChapterSkip());
+    this.api.event.on('mpv.eof-reached.changed', () => this.eofReachedChanged());
     this.api.event.on('mpv.seek', () => void this.reportImmediate('seek'));
     this.api.event.on('mpv.end-file', () => {
       this.handleEndFile();
     });
     this.api.event.on('iina.window-will-close', () => {
+      if (this.globalPlaybackId !== undefined) this.notifyPlaybackReleased(this.globalPlaybackId);
       this.clearProgressTimer();
       this.clearSidebarRecoveryTimer();
       this.clearChapterSkip(true);
       this.resetChapterTracking();
       this.pendingFinalChapterSkip = undefined;
+      this.playlistRefreshSequence += 1;
+      // IINA stops mpv before emitting window-will-close. Playlist mutations
+      // from this point can make IINA treat mpv's MPV_ERROR_COMMAND response as
+      // a fatal application error, and the closing core no longer needs them.
+      this.discardOwnedPlaylistState();
       this.replacementSequence += 1;
       this.discardPendingHandoffs();
       this.invalidatePendingLoads();
@@ -310,6 +368,11 @@ export class PlayerRuntime {
     const candidate = raw as Partial<PlayerLaunch>;
     if (
       typeof candidate.nonce !== 'string' ||
+      typeof candidate.serverId !== 'string' ||
+      candidate.connection === undefined ||
+      typeof candidate.connection.serverId !== 'string' ||
+      typeof candidate.connection.userId !== 'string' ||
+      typeof candidate.connection.lastConnectedAt !== 'string' ||
       candidate.context === undefined ||
       candidate.display === undefined
     ) {
@@ -319,6 +382,8 @@ export class PlayerRuntime {
     if (!parsed.success) return;
     const launch: PlayerLaunch = {
       nonce: candidate.nonce,
+      serverId: candidate.serverId,
+      connection: candidate.connection,
       plan: parsed.data,
       context: candidate.context,
       display: candidate.display,
@@ -329,6 +394,7 @@ export class PlayerRuntime {
     ) {
       launch.diagnosticCorrelation = candidate.diagnosticCorrelation;
     }
+    this.globalPlaybackId = launch.nonce;
     // IINA retains plugin-managed PlayerCore instances after their windows close.
     // A later launch reuses the same main entry, so restart the timer stopped by
     // window-will-close instead of assuming install() will run again.
@@ -336,6 +402,7 @@ export class PlayerRuntime {
     this.clearChapterSkip(true);
     this.resetChapterTracking();
     this.pendingFinalChapterSkip = undefined;
+    this.discardPendingHandoffs();
     const sequence = ++this.replacementSequence;
     this.invalidatePendingLoads();
     this.enqueueControl(() => this.replace(launch, sequence));
@@ -563,14 +630,76 @@ export class PlayerRuntime {
 
   private async resolveLoad(next?: () => void): Promise<void> {
     const original = this.api.mpv.getString('stream-open-filename');
-    if (original !== 'null://') {
+    const linkedMedia = this.parseMediaReference(original);
+    if (linkedMedia !== undefined || original !== 'null://') {
+      this.heldCompletedPositionSeconds = undefined;
+    }
+    const consumed = this.consumePendingLaunch(original);
+    if (consumed === null) {
+      next?.();
+      return;
+    }
+    let pending = consumed;
+
+    if (pending === undefined && linkedMedia !== undefined) {
+      const ownedLaunch = this.launch;
+      const previousPlaybackId = this.globalPlaybackId;
+      const ownedGeneration = this.session.generation;
+      const sequence = ++this.replacementSequence;
+      this.discardPendingHandoffs();
+      this.invalidatePendingLoads();
+      this.playlistRefreshSequence += 1;
+      try {
+        if (ownedLaunch !== undefined) await this.releaseForExternalLoad(false);
+        const launch = await this.prepareLinkedLaunch(linkedMedia, sequence);
+        pending = { launch, replacementSequence: sequence, mediaLink: original };
+        this.api.global.postMessage(PLAYER_MESSAGES.linkedLaunch, {
+          playbackId: launch.nonce,
+          connection: launch.connection,
+          ...(previousPlaybackId === undefined ? {} : { previousPlaybackId }),
+        });
+      } catch (error) {
+        if (error instanceof StalePlayerLoadError || sequence !== this.replacementSequence) {
+          next?.();
+          return;
+        }
+        if (previousPlaybackId !== undefined) this.notifyPlaybackReleased(previousPlaybackId);
+        if (ownedLaunch !== undefined) {
+          this.cleanupPlaybackIfOwned(ownedLaunch, ownedGeneration);
+          this.sidebarPresented = false;
+          this.publishState();
+        }
+        this.clearOwnedPlaylistEntries();
+        this.clearMediaCredentials();
+        this.api.mpv.set('file-local-options/keep-open', 'always');
+        this.api.mpv.set('stream-open-filename', 'null://');
+        if (error instanceof VideoTranscodeConfirmationRequiredError) {
+          this.logger.info('player.linked-media.transcode-confirmation-required');
+          this.api.core.osd(
+            'Open this item from the Jellyfin library to approve video conversion.',
+          );
+        } else {
+          this.logger.warn('Could not prepare a linked Jellyfin item', error);
+          this.api.core.osd(
+            'This Jellyfin item could not be opened. Reconnect or use the library.',
+          );
+        }
+        next?.();
+        return;
+      }
+    }
+
+    if (pending === undefined && linkedMedia === undefined && original !== 'null://') {
       const ownedLaunch = this.launch;
       const ownedGeneration = this.session.generation;
       this.replacementSequence += 1;
       this.discardPendingHandoffs();
       this.invalidatePendingLoads();
+      this.clearOwnedPlaylistEntries();
       try {
-        if (ownedLaunch !== undefined) await this.releaseForExternalLoad();
+        if (ownedLaunch !== undefined || this.globalPlaybackId !== undefined) {
+          await this.releaseForExternalLoad();
+        }
       } catch (error) {
         this.logger.warn('Could not release Jellyfin playback for an external load', error);
       } finally {
@@ -588,15 +717,6 @@ export class PlayerRuntime {
       }
       return;
     }
-
-    let pending: (typeof this.pendingLaunchesForHook)[number] | undefined;
-    while (this.pendingLaunchesForHook.length > 0) {
-      const candidate = this.pendingLaunchesForHook.shift();
-      if (candidate?.replacementSequence === this.replacementSequence) {
-        pending = candidate;
-        break;
-      }
-    }
     if (pending === undefined) {
       next?.();
       return;
@@ -607,6 +727,7 @@ export class PlayerRuntime {
     try {
       const launch = pending.launch;
       this.launch = launch;
+      this.globalPlaybackId = launch.nonce;
       this.activeLoadReplacementSequence = pending.replacementSequence;
       this.session = beginPlaybackSession(this.session, launch.plan);
       this.playbackStartedAtMs = Date.now();
@@ -677,6 +798,7 @@ export class PlayerRuntime {
           this.publishState();
           this.api.mpv.set('stream-open-filename', 'null://');
         } finally {
+          this.notifyPlaybackReleased(failedLaunch.nonce);
           this.cleanupPlaybackIfOwned(failedLaunch, generation);
         }
         await report;
@@ -688,6 +810,226 @@ export class PlayerRuntime {
       }
     } finally {
       next?.();
+    }
+  }
+
+  private consumePendingLaunch(
+    mediaLink: string,
+  ): (typeof this.pendingLaunchesForHook)[number] | null | undefined {
+    const requested = this.parseMediaReference(mediaLink);
+    const identity = mediaLinkIdentity(requested);
+    let pending: (typeof this.pendingLaunchesForHook)[number] | undefined;
+    for (let index = this.pendingLaunchesForHook.length - 1; index >= 0; index -= 1) {
+      const candidate = this.pendingLaunchesForHook[index];
+      if (candidate === undefined) continue;
+      if (candidate.replacementSequence !== this.replacementSequence) {
+        this.pendingLaunchesForHook.splice(index, 1);
+        this.markStaleMediaLink(candidate.mediaLink);
+        continue;
+      }
+      const candidateLink = this.parseMediaReference(candidate.mediaLink);
+      if (
+        pending === undefined &&
+        (candidate.mediaLink === mediaLink ||
+          (requested !== undefined &&
+            candidateLink?.serverId === requested.serverId &&
+            candidateLink.itemId === requested.itemId))
+      ) {
+        this.pendingLaunchesForHook.splice(index, 1);
+        pending = candidate;
+      }
+    }
+    if (pending !== undefined) {
+      if (identity !== undefined) this.staleOwnedMediaLinks.delete(identity);
+      return pending;
+    }
+    return identity !== undefined && this.consumeStaleMediaLink(identity) ? null : undefined;
+  }
+
+  private parseMediaReference(value: unknown): JellyfinMediaLink | undefined {
+    const legacy = parseJellyfinMediaLink(value);
+    if (legacy !== undefined) return legacy;
+    if (typeof value !== 'string' || !value.startsWith('/')) return undefined;
+    try {
+      const dataRoot = this.api.utils.resolvePath('@data/');
+      if (typeof dataRoot !== 'string' || !dataRoot.startsWith('/')) return undefined;
+      const root = dataRoot.replace(/\/+$/, '');
+      if (!value.startsWith(`${root}/`)) return undefined;
+      const relative = value.slice(root.length + 1);
+      if (relative.length === 0 || relative.length > 512 || relative.includes('/'))
+        return undefined;
+      const queued = this.queuedMediaReferences.get(value);
+      if (queued !== undefined) {
+        if (!matchesJellyfinMediaReferencePath(value, dataRoot, queued.media)) return undefined;
+        if (!this.api.file.exists(queued.dataPath)) {
+          this.api.file.write(queued.dataPath, queued.document);
+        } else if (this.readMediaReferenceDocument(queued.dataPath) !== queued.document) {
+          return undefined;
+        }
+        this.queuedMediaReferences.delete(value);
+        return queued.media;
+      }
+      const raw = this.readMediaReferenceDocument(value);
+      if (raw === undefined) return undefined;
+      const parsed = parseJellyfinMediaLink(raw);
+      return parsed !== undefined && matchesJellyfinMediaReferencePath(value, dataRoot, parsed)
+        ? parsed
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private readMediaReferenceDocument(path: string): string | undefined {
+    let handle: IINA.API.FileHandle | undefined;
+    try {
+      handle = this.api.file.handle(path, 'read') ?? undefined;
+      if (handle === undefined) return undefined;
+      const raw = handle.read(4_097) as unknown;
+      if (raw === null || raw === undefined || typeof raw === 'string') return undefined;
+      const bytes = Array.from(raw as ArrayLike<number>);
+      if (
+        bytes.length > 4_096 ||
+        bytes.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 0x7f)
+      ) {
+        return undefined;
+      }
+      return String.fromCharCode(...bytes);
+    } catch {
+      return undefined;
+    } finally {
+      try {
+        handle?.close();
+      } catch {
+        // Reading a marker is best-effort; a failed close must not disrupt playback.
+      }
+    }
+  }
+
+  private ensureMediaReference(input: JellyfinMediaLink): string {
+    const reference = createJellyfinMediaReference(input);
+    const dataRoot = this.api.utils.resolvePath('@data/');
+    if (typeof dataRoot !== 'string' || !dataRoot.startsWith('/')) {
+      throw new Error('IINA could not resolve the plugin-private data path.');
+    }
+    if (this.api.file.exists(reference.dataPath)) {
+      if (this.readMediaReferenceDocument(reference.dataPath) !== reference.document) {
+        throw new Error('The Jellyfin history reference is occupied by another item.');
+      }
+    } else {
+      this.api.file.write(reference.dataPath, reference.document);
+    }
+    const resolved = this.api.utils.resolvePath(reference.dataPath);
+    if (
+      typeof resolved === 'string' &&
+      matchesJellyfinMediaReferencePath(resolved, dataRoot, input)
+    ) {
+      return resolved;
+    }
+    throw new Error('IINA could not create the Jellyfin history reference.');
+  }
+
+  private reserveMediaReference(input: JellyfinMediaLink): string {
+    const reference = createJellyfinMediaReference(input);
+    const media = parseJellyfinMediaLink(reference.document);
+    const dataRoot = this.api.utils.resolvePath('@data/');
+    if (media === undefined || typeof dataRoot !== 'string' || !dataRoot.startsWith('/')) {
+      throw new Error('IINA could not prepare a Jellyfin playlist reference.');
+    }
+    const resolved = this.api.utils.resolvePath(reference.dataPath);
+    if (
+      typeof resolved !== 'string' ||
+      !matchesJellyfinMediaReferencePath(resolved, dataRoot, media)
+    ) {
+      throw new Error('IINA could not resolve the Jellyfin playlist reference.');
+    }
+    const reserved = this.queuedMediaReferences.get(resolved);
+    if (
+      reserved !== undefined &&
+      (reserved.media.serverId !== media.serverId || reserved.media.itemId !== media.itemId)
+    ) {
+      throw new Error('The Jellyfin playlist reference is occupied by another item.');
+    }
+    if (
+      this.api.file.exists(reference.dataPath) &&
+      this.readMediaReferenceDocument(reference.dataPath) !== reference.document
+    ) {
+      throw new Error('The Jellyfin playlist reference does not match its item.');
+    }
+    this.queuedMediaReferences.set(resolved, { ...reference, media });
+    return resolved;
+  }
+
+  private async prepareLinkedLaunch(
+    link: JellyfinMediaLink,
+    replacementSequence: number,
+  ): Promise<PlayerLaunch> {
+    const store = new ConnectionStore(this.api.preferences, createIinaKeychainApi(this.api.utils));
+    const metadata = store.readMetadata();
+    if (metadata === undefined || metadata.serverId !== link.serverId) {
+      throw new Error('The saved Jellyfin connection does not match this media item.');
+    }
+    const accessToken = store.readAccessToken(metadata);
+    if (accessToken === undefined) throw new Error('The saved Jellyfin session is unavailable.');
+    const context = {
+      serverUrl: metadata.serverUrl,
+      userId: metadata.userId,
+      accessToken,
+      deviceId: metadata.deviceId,
+      version: PLUGIN_VERSION,
+    };
+    const client = new JellyfinClient(this.transport, {
+      deviceId: metadata.deviceId,
+      version: PLUGIN_VERSION,
+    });
+    const details = BaseItemSchema.parse(
+      await client.queryCatalog({ kind: 'details', itemId: link.itemId }, context),
+    );
+    if (replacementSequence !== this.replacementSequence) throw new StalePlayerLoadError();
+    this.assertLinkedConnectionCurrent(store, metadata, accessToken);
+    if (details.Id !== link.itemId) throw new Error('Jellyfin returned a different media item.');
+    assertPlayableMediaItem(details);
+    const request = PlaybackRequestSchema.parse({
+      itemId: details.Id,
+      startPositionTicks:
+        details.UserData?.Played === true ? 0 : (details.UserData?.PlaybackPositionTicks ?? 0),
+      openInNewWindow: false,
+    });
+    const plan = await client.createPlaybackPlan(request, context);
+    if (replacementSequence !== this.replacementSequence) throw new StalePlayerLoadError();
+    this.assertLinkedConnectionCurrent(store, metadata, accessToken);
+    if (plan.requiresVideoTranscodeConfirmation) {
+      throw new VideoTranscodeConfirmationRequiredError();
+    }
+    return {
+      nonce: createOpaqueId('play'),
+      serverId: metadata.serverId,
+      connection: {
+        serverId: metadata.serverId,
+        userId: metadata.userId,
+        lastConnectedAt: metadata.lastConnectedAt,
+      },
+      diagnosticCorrelation: createOpaqueId('diagnostic-playback'),
+      plan,
+      context,
+      display: displayMetadataFromItem(details),
+    };
+  }
+
+  private assertLinkedConnectionCurrent(
+    store: ConnectionStore,
+    expected: { serverId: string; userId: string; lastConnectedAt: string },
+    expectedAccessToken: string,
+  ): void {
+    const current = store.readMetadata();
+    if (
+      current === undefined ||
+      current.serverId !== expected.serverId ||
+      current.userId !== expected.userId ||
+      current.lastConnectedAt !== expected.lastConnectedAt ||
+      store.readAccessToken(current) !== expectedAccessToken
+    ) {
+      throw new StalePlayerLoadError();
     }
   }
 
@@ -794,7 +1136,169 @@ export class PlayerRuntime {
     // Enqueue the start report before chapter skipping can synchronously produce
     // seek/progress or end-file callbacks for a very short opening/ending.
     this.reconcileChapterSkip();
+    void this.refreshNativePlaylist(this.launch, generation);
     if (startReport !== undefined) await startReport;
+  }
+
+  private async refreshNativePlaylist(launch: PlayerLaunch, generation: number): Promise<void> {
+    const refreshSequence = ++this.playlistRefreshSequence;
+    const seriesId = launch.display.seriesId;
+    if (seriesId === undefined) return;
+    const identity: ConstructorParameters<typeof JellyfinClient>[1] = {
+      deviceId: launch.context.deviceId,
+      version: launch.context.version,
+    };
+    if (launch.context.client !== undefined) identity.client = launch.context.client;
+    if (launch.context.device !== undefined) identity.device = launch.context.device;
+    const client = new JellyfinClient(this.transport, identity);
+    const refreshReservations: string[] = [];
+    let retainReservations = false;
+    try {
+      const episodes: BaseItem[] = [];
+      let startIndex = 0;
+      while (episodes.length < MAX_PLAYLIST_EPISODES_SCANNED) {
+        const result = ItemsResultSchema.parse(
+          await client.queryCatalog(
+            {
+              kind: 'episodes',
+              seriesId,
+              seasonId: launch.display.seasonId,
+              startIndex,
+              limit: PLAYLIST_EPISODE_PAGE_SIZE,
+            },
+            launch.context,
+          ),
+        );
+        if (
+          refreshSequence !== this.playlistRefreshSequence ||
+          this.launch !== launch ||
+          this.session.generation !== generation
+        ) {
+          return;
+        }
+        episodes.push(...result.Items);
+        const nextStart = result.StartIndex + result.Items.length;
+        if (
+          result.Items.length === 0 ||
+          nextStart <= startIndex ||
+          nextStart >= result.TotalRecordCount
+        ) {
+          break;
+        }
+        const selected = selectSeasonPlaylistEpisodes(
+          episodes,
+          launch.plan.itemId,
+          launch.display.seasonNumber,
+        );
+        if (selected.after.length >= 100) break;
+        startIndex = nextStart;
+      }
+      const selected = selectSeasonPlaylistEpisodes(
+        episodes,
+        launch.plan.itemId,
+        launch.display.seasonNumber,
+      );
+      if (
+        refreshSequence !== this.playlistRefreshSequence ||
+        this.launch !== launch ||
+        this.session.generation !== generation
+      ) {
+        return;
+      }
+
+      this.clearOwnedPlaylistEntries();
+      const existing = this.api.playlist.list();
+      const currentIndex = existing.findIndex((item) => item.isPlaying);
+      const playlistEntries: Array<{ location: string; title: string }> = [];
+      for (const episode of [...selected.before, ...selected.after]) {
+        if (
+          refreshSequence !== this.playlistRefreshSequence ||
+          this.launch !== launch ||
+          this.session.generation !== generation
+        ) {
+          return;
+        }
+        const title = normalizeJellyfinMediaTitle(mediaTitle(displayMetadataFromItem(episode)));
+        const location = this.reserveMediaReference({
+          serverId: launch.serverId,
+          itemId: episode.Id,
+          title,
+        });
+        refreshReservations.push(location);
+        playlistEntries.push({ location, title });
+      }
+      if (playlistEntries.length > 0) {
+        const playlistPath = `@tmp/jellyfin-playlist-${safeTemporaryNameComponent(launch.nonce)}-${generation}-${refreshSequence}.m3u8`;
+        try {
+          this.api.file.write(playlistPath, serializeNativePlaylist(playlistEntries));
+          const resolved = this.api.utils.resolvePath(playlistPath);
+          if (typeof resolved !== 'string' || !resolved.startsWith('/')) {
+            throw new Error('IINA could not resolve the plugin-private playlist path.');
+          }
+          // loadlist parses EXTINF titles synchronously, so every unopened item
+          // is readable in IINA's playlist instead of displaying its locator.
+          const loadIndex = currentIndex >= 0 ? currentIndex : existing.length;
+          this.api.mpv.command('loadlist', [resolved, 'insert-at', String(loadIndex)]);
+          retainReservations = true;
+          for (const entry of playlistEntries) this.ownedPlaylistLinks.add(entry.location);
+          if (currentIndex >= 0 && selected.after.length > 0) {
+            this.api.mpv.command('playlist-move', [
+              String(currentIndex + playlistEntries.length),
+              String(currentIndex + selected.before.length),
+            ]);
+          }
+          this.api.mpv.set('file-local-options/keep-open', 'always');
+        } finally {
+          try {
+            if (this.api.file.exists(playlistPath)) this.api.file.delete(playlistPath);
+          } catch (error) {
+            this.logger.warn('Could not remove the temporary Jellyfin playlist', error);
+          }
+        }
+      }
+      this.logger.info('player.playlist.refreshed', {
+        earlier: selected.before.length,
+        later: selected.after.length,
+      });
+    } catch (error) {
+      if (
+        refreshSequence === this.playlistRefreshSequence &&
+        this.launch === launch &&
+        this.session.generation === generation
+      ) {
+        this.logger.warn('Could not populate IINA playlist from Jellyfin', error);
+      }
+    } finally {
+      if (!retainReservations) {
+        for (const location of refreshReservations) this.queuedMediaReferences.delete(location);
+      }
+    }
+  }
+
+  private clearOwnedPlaylistEntries(): void {
+    if (this.ownedPlaylistLinks.size === 0) {
+      this.queuedMediaReferences.clear();
+      return;
+    }
+    try {
+      const entries = this.api.playlist.list();
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const item = entries[index];
+        if (item !== undefined && !item.isPlaying && this.ownedPlaylistLinks.has(item.filename)) {
+          this.api.playlist.remove(index);
+        }
+      }
+    } catch (error) {
+      this.logger.warn('Could not remove the managed Jellyfin playlist entries', error);
+    } finally {
+      this.queuedMediaReferences.clear();
+      this.ownedPlaylistLinks.clear();
+    }
+  }
+
+  private discardOwnedPlaylistState(): void {
+    this.queuedMediaReferences.clear();
+    this.ownedPlaylistLinks.clear();
   }
 
   private loadExternalSubtitleTrack(): void {
@@ -854,6 +1358,35 @@ export class PlayerRuntime {
     if (this.replacementEndFilesToIgnore > 0) {
       this.replacementEndFilesToIgnore -= 1;
       return;
+    }
+    void this.ended();
+  }
+
+  private eofReachedChanged(): void {
+    if (!this.api.mpv.getFlag('eof-reached')) {
+      if (this.heldCompletedPositionSeconds !== undefined) {
+        // `keep-open=always` deliberately prevents native playlist autoplay.
+        // Once credentials and reporting state are scrubbed at EOF, prevent a
+        // seek-back from resuming an untracked authenticated stream.
+        this.api.mpv.set('pause', true);
+        this.api.mpv.set('time-pos', this.heldCompletedPositionSeconds);
+        this.api.core.osd('Choose an episode from the playlist to continue.');
+      }
+      return;
+    }
+    if (this.launch === undefined || this.session.generation === this.eofCompletedGeneration)
+      return;
+    if (
+      this.session.status !== 'preparing' &&
+      this.session.status !== 'playing' &&
+      this.session.status !== 'paused'
+    ) {
+      return;
+    }
+    this.eofCompletedGeneration = this.session.generation;
+    const duration = this.api.mpv.getNumber('duration');
+    if (Number.isFinite(duration) && duration >= 0) {
+      this.heldCompletedPositionSeconds = duration;
     }
     void this.ended();
   }
@@ -1076,6 +1609,11 @@ export class PlayerRuntime {
 
   private async stop(reason: 'closed' | 'replaced' | 'user', closing: boolean): Promise<void> {
     this.discardPendingHandoffs();
+    if (closing) {
+      this.discardOwnedPlaylistState();
+    } else {
+      this.clearOwnedPlaylistEntries();
+    }
     if (this.launch === undefined) {
       this.clearMediaCredentials();
       this.deleteExternalSubtitle();
@@ -1115,8 +1653,9 @@ export class PlayerRuntime {
     if (endAcknowledgement !== undefined) await endAcknowledgement;
   }
 
-  private releaseForExternalLoad(): Promise<void> {
+  private releaseForExternalLoad(notifyGlobal = true): Promise<void> {
     const launch = this.launch;
+    const playbackId = this.globalPlaybackId;
     const generation = this.session.generation;
     let report: Promise<void> | undefined;
     try {
@@ -1139,7 +1678,10 @@ export class PlayerRuntime {
       }
     } finally {
       this.clearUpNext(true);
-      if (launch !== undefined) this.cleanupPlaybackIfOwned(launch, generation);
+      if (notifyGlobal && playbackId !== undefined) this.notifyPlaybackReleased(playbackId);
+      if (launch !== undefined) {
+        this.cleanupPlaybackIfOwned(launch, generation);
+      }
     }
     if (report !== undefined) {
       void report.catch((error) => {
@@ -1149,6 +1691,11 @@ export class PlayerRuntime {
     // Reporting remains serialized in reportQueue, but an unrelated local load
     // must not wait for a network round trip before its on_load hook can continue.
     return Promise.resolve();
+  }
+
+  private notifyPlaybackReleased(playbackId: string): void {
+    this.api.global.postMessage(PLAYER_MESSAGES.closed, { playbackId });
+    if (this.globalPlaybackId === playbackId) this.globalPlaybackId = undefined;
   }
 
   private clearMediaCredentials(): void {
@@ -1214,7 +1761,27 @@ export class PlayerRuntime {
   }
 
   private discardPendingHandoffs(): void {
+    for (const pending of this.pendingLaunchesForHook) this.markStaleMediaLink(pending.mediaLink);
     this.pendingLaunchesForHook.length = 0;
+  }
+
+  private markStaleMediaLink(value: unknown): void {
+    const identity = mediaLinkIdentity(this.parseMediaReference(value));
+    if (identity === undefined) return;
+    this.staleOwnedMediaLinks.delete(identity);
+    this.staleOwnedMediaLinks.set(identity, Date.now() + STALE_MEDIA_LINK_TTL_MS);
+    while (this.staleOwnedMediaLinks.size > MAX_STALE_MEDIA_LINKS) {
+      const oldest = this.staleOwnedMediaLinks.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.staleOwnedMediaLinks.delete(oldest);
+    }
+  }
+
+  private consumeStaleMediaLink(identity: string): boolean {
+    const expiresAt = this.staleOwnedMediaLinks.get(identity);
+    if (expiresAt === undefined) return false;
+    this.staleOwnedMediaLinks.delete(identity);
+    return expiresAt >= Date.now();
   }
 
   private ensureProgressTimer(): void {
@@ -1268,26 +1835,33 @@ export class PlayerRuntime {
     this.resetChapterTracking();
     this.pendingFinalChapterSkip = undefined;
     this.clearUpNext(true);
+    this.playlistRefreshSequence += 1;
+    this.clearOwnedPlaylistEntries();
     const coreWasIdle = this.api.core.status.idle;
     const hadActiveMedia = this.retireForReplacement();
     if (sequence !== this.replacementSequence) return;
     const replaceInsideMpv = hadActiveMedia || !coreWasIdle;
     if (replaceInsideMpv) this.replacementEndFilesToIgnore += 1;
-    const pending = { launch, replacementSequence: sequence };
+    const mediaLink = this.ensureMediaReference({
+      serverId: launch.serverId,
+      itemId: launch.plan.itemId,
+      title: mediaTitle(launch.display),
+    });
+    const pending = { launch, replacementSequence: sequence, mediaLink };
     this.pendingLaunchesForHook.push(pending);
     try {
-      // IINA logs URLs passed to core.open. Open mpv's local null protocol and replace
-      // stream-open-filename from the on_load hook so authenticated media URLs never
-      // enter IINA's Open URL/authentication flow or its core-open diagnostics.
+      // IINA shows the filename for local History and Open Recent entries. Use
+      // a persistent, readable, credential-free marker file, then replace
+      // stream-open-filename from on_load so authenticated URLs stay private.
       if (replaceInsideMpv) {
         // PlayerCore.open closes an already-visible network player in IINA 1.4.4.
         // Replacing from mpv keeps the managed window alive while preserving the
         // same authenticated on_load handoff used for an initial/reopened core.
-        this.api.mpv.command('loadfile', ['null://', 'replace']);
+        this.api.mpv.command('loadfile', [mediaLink, 'replace']);
       } else {
         // A stopped/closed controlled core is idle, so the IINA API is required
         // here to reopen its native player window.
-        this.api.core.open('null://');
+        this.api.core.open(mediaLink);
       }
     } catch (error) {
       const pendingIndex = this.pendingLaunchesForHook.indexOf(pending);

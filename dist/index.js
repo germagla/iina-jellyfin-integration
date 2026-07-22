@@ -1073,6 +1073,66 @@
     };
   }
 
+  // packages/core/src/device-profile.ts
+  var VIDEO_CONTAINERS = "mkv,mp4,m4v,mov,ts,mpegts,webm,avi";
+  var VIDEO_CODECS = "h264,hevc,vp8,vp9,av1,mpeg2video,mpeg4,vc1";
+  var VIDEO_AUDIO_CODECS = "aac,ac3,eac3,mp3,flac,alac,opus,vorbis,pcm_s16le,pcm_s24le,truehd,dts";
+  var AUDIO_CONTAINERS = "mp3,aac,m4a,flac,ogg,oga,opus,wav,aiff,alac";
+  function createIinaDeviceProfile(maxStreamingBitrate = 12e7) {
+    if (!Number.isInteger(maxStreamingBitrate) || maxStreamingBitrate < 1e6) {
+      throw new RangeError("maxStreamingBitrate must be an integer of at least 1 Mbps");
+    }
+    return {
+      Name: "IINA Direct Mode",
+      MaxStreamingBitrate: maxStreamingBitrate,
+      MaxStaticBitrate: maxStreamingBitrate,
+      MusicStreamingTranscodingBitrate: 384e3,
+      TimelineOffsetSeconds: 0,
+      DirectPlayProfiles: [
+        {
+          Type: "Video",
+          Container: VIDEO_CONTAINERS,
+          VideoCodec: VIDEO_CODECS,
+          AudioCodec: VIDEO_AUDIO_CODECS
+        },
+        {
+          Type: "Audio",
+          Container: AUDIO_CONTAINERS
+        }
+      ],
+      TranscodingProfiles: [
+        {
+          Type: "Video",
+          Context: "Streaming",
+          Protocol: "hls",
+          Container: "ts",
+          VideoCodec: "h264,hevc",
+          AudioCodec: "aac,ac3,eac3,opus",
+          MaxAudioChannels: "8",
+          CopyTimestamps: true,
+          EnableSubtitlesInManifest: true
+        },
+        {
+          Type: "Audio",
+          Context: "Streaming",
+          Protocol: "http",
+          Container: "mp3",
+          AudioCodec: "mp3",
+          MaxAudioChannels: "2"
+        }
+      ],
+      SubtitleProfiles: [
+        { Format: "srt", Method: "External" },
+        { Format: "vtt", Method: "External" },
+        { Format: "ass", Method: "External" },
+        { Format: "ssa", Method: "External" },
+        { Format: "pgs", Method: "Embed" },
+        { Format: "dvdsub", Method: "Embed" },
+        { Format: "dvbsub", Method: "Embed" }
+      ]
+    };
+  }
+
   // packages/core/src/portable-url.ts
   var import_uri_js = __toESM(require_uri_all(), 1);
   function containsUrlWhitespaceOrControl(value) {
@@ -1196,6 +1256,15 @@
       href
     };
   }
+  function resolveAbsoluteUrl(baseUrl, reference) {
+    if (containsUrlWhitespaceOrControl(reference)) throw new TypeError("Invalid URL");
+    const base = parseAbsoluteUrl(baseUrl);
+    if (/^[A-Za-z][A-Za-z\d+.-]*:\/\//.test(reference)) return parseAbsoluteUrl(reference);
+    if (reference.startsWith("//") && !hasValidRawAuthority(`${base.scheme}:${reference}`)) {
+      throw new TypeError("Invalid URL");
+    }
+    return parseAbsoluteUrl((0, import_uri_js.resolve)(base.href, reference));
+  }
   function serializeAbsoluteUrl(value) {
     return (0, import_uri_js.serialize)(uriComponents(value));
   }
@@ -1263,6 +1332,13 @@
   }
   function encodeQueryEntries(entries) {
     return entries.map(([name, value]) => `${encodeQueryComponent(name)}=${encodeQueryComponent(value)}`).join("&");
+  }
+  function encodeQuery(values) {
+    return encodeQueryEntries(
+      Object.entries(values).flatMap(
+        ([name, value]) => value === void 0 ? [] : [[name, String(value)]]
+      )
+    );
   }
   function queryValueCaseInsensitive(url, name) {
     const wanted = name.toLowerCase();
@@ -1374,6 +1450,287 @@
     const normalized = normalizeServerUrl(baseUrl, { allowInsecureRemote: true });
     const suffix = apiPath.replace(/^\/+/, "");
     return suffix.length === 0 ? normalized.url : `${normalized.url}/${suffix}`;
+  }
+  function hasAmbiguousPathEncoding(pathname) {
+    let decoded = pathname;
+    for (let depth = 0; depth < 4; depth += 1) {
+      if (decoded.includes("\\") || decoded.split("/").some((part) => part === "." || part === "..")) {
+        return true;
+      }
+      let next;
+      try {
+        next = decodeURIComponent(decoded);
+      } catch {
+        return true;
+      }
+      if (next === decoded) return false;
+      decoded = next;
+    }
+    return true;
+  }
+  function resolveJellyfinUrl(baseUrl, returnedUrl) {
+    const value = returnedUrl.trim();
+    const server = normalizeServerUrl(baseUrl, { allowInsecureRemote: true });
+    let resolved;
+    try {
+      if (/^https?:\/\//i.test(value) || value.startsWith("//")) {
+        resolved = resolveAbsoluteUrl(server.origin, value);
+      } else {
+        resolved = resolveAbsoluteUrl(`${server.url}/`, value.replace(/^\/+/, ""));
+      }
+    } catch {
+      throw new ServerUrlError("INVALID_URL", "Jellyfin returned an invalid media URL");
+    }
+    const withinBasePath = server.basePath === "" || resolved.pathname === server.basePath || resolved.pathname.startsWith(`${server.basePath}/`);
+    if (resolved.userinfo !== void 0 || resolved.origin !== server.origin || !withinBasePath || hasAmbiguousPathEncoding(resolved.pathname)) {
+      throw new ServerUrlError(
+        "INVALID_URL",
+        "Jellyfin returned a media URL outside the configured server address"
+      );
+    }
+    return resolved.href;
+  }
+
+  // packages/core/src/api.ts
+  function authorizationOptions(identity, accessToken) {
+    const result = {
+      client: identity.client ?? DEFAULT_CLIENT_NAME,
+      device: identity.device ?? DEFAULT_DEVICE_NAME,
+      deviceId: identity.deviceId,
+      version: identity.version
+    };
+    if (accessToken !== void 0) result.accessToken = accessToken;
+    return result;
+  }
+  function jsonHeaders(identity, accessToken) {
+    return {
+      ...createAuthorizationHeaders(authorizationOptions(identity, accessToken)),
+      "Content-Type": "application/json"
+    };
+  }
+  function withQuery(url, values) {
+    const query = encodeQuery(values);
+    return query === "" ? url : `${url}?${query}`;
+  }
+  function itemFields() {
+    return [
+      "Overview",
+      "Genres",
+      "People",
+      "DateCreated",
+      "PremiereDate",
+      "ProductionYear",
+      "RunTimeTicks",
+      "LocationType",
+      "IsPlaceHolder",
+      "MediaSources",
+      "MediaStreams",
+      "ProviderIds",
+      "CommunityRating"
+    ].join(",");
+  }
+  function authenticatedHeaders(context) {
+    return createAuthorizationHeaders(authorizationOptions(context, context.accessToken));
+  }
+  function buildPublicServerInfoRequest(serverUrl) {
+    return {
+      method: "GET",
+      url: joinJellyfinPath(serverUrl, "System/Info/Public"),
+      headers: { Accept: "application/json" }
+    };
+  }
+  function buildPasswordAuthenticationRequest(serverUrl, identity, credentials) {
+    return {
+      method: "POST",
+      url: joinJellyfinPath(serverUrl, "Users/AuthenticateByName"),
+      headers: jsonHeaders(identity),
+      body: { Username: credentials.username, Pw: credentials.password }
+    };
+  }
+  function buildQuickConnectInitiateRequest(serverUrl, identity) {
+    return {
+      method: "POST",
+      url: joinJellyfinPath(serverUrl, "QuickConnect/Initiate"),
+      headers: jsonHeaders(identity),
+      body: {}
+    };
+  }
+  function buildQuickConnectStatusRequest(serverUrl, identity, secret) {
+    return {
+      method: "GET",
+      url: withQuery(joinJellyfinPath(serverUrl, "QuickConnect/Connect"), { Secret: secret }),
+      headers: createAuthorizationHeaders(authorizationOptions(identity))
+    };
+  }
+  function buildQuickConnectAuthenticationRequest(serverUrl, identity, secret) {
+    return {
+      method: "POST",
+      url: joinJellyfinPath(serverUrl, "Users/AuthenticateWithQuickConnect"),
+      headers: jsonHeaders(identity),
+      body: { Secret: secret }
+    };
+  }
+  function buildSessionLogoutRequest(context) {
+    return {
+      method: "POST",
+      url: joinJellyfinPath(context.serverUrl, "Sessions/Logout"),
+      headers: jsonHeaders(context, context.accessToken),
+      body: {}
+    };
+  }
+  function buildCatalogRequest(rawRequest, context) {
+    const request = rawRequest;
+    const userId = encodeURIComponent(context.userId);
+    const headers = authenticatedHeaders(context);
+    const fields = itemFields();
+    switch (request.kind) {
+      case "libraries":
+        return {
+          method: "GET",
+          url: joinJellyfinPath(context.serverUrl, `Users/${userId}/Views`),
+          headers
+        };
+      case "home": {
+        if (request.shelf === "continueWatching") {
+          return {
+            method: "GET",
+            url: withQuery(joinJellyfinPath(context.serverUrl, `Users/${userId}/Items/Resume`), {
+              IncludeItemTypes: "Movie,Episode",
+              Fields: fields,
+              ImageTypeLimit: 1,
+              EnableImageTypes: "Primary,Backdrop,Thumb",
+              Limit: request.limit
+            }),
+            headers
+          };
+        }
+        if (request.shelf === "nextUp") {
+          return {
+            method: "GET",
+            url: withQuery(joinJellyfinPath(context.serverUrl, "Shows/NextUp"), {
+              UserId: context.userId,
+              Fields: fields,
+              ImageTypeLimit: 1,
+              EnableImageTypes: "Primary,Backdrop,Thumb",
+              Limit: request.limit,
+              SeriesId: request.seriesId
+            }),
+            headers
+          };
+        }
+        return {
+          method: "GET",
+          url: withQuery(joinJellyfinPath(context.serverUrl, `Users/${userId}/Items/Latest`), {
+            IncludeItemTypes: "Movie,Series,Episode",
+            Fields: fields,
+            ImageTypeLimit: 1,
+            EnableImageTypes: "Primary,Backdrop,Thumb",
+            Limit: request.limit
+          }),
+          headers
+        };
+      }
+      case "library":
+        return {
+          method: "GET",
+          url: withQuery(joinJellyfinPath(context.serverUrl, `Users/${userId}/Items`), {
+            ParentId: request.parentId,
+            IncludeItemTypes: request.itemType,
+            Recursive: true,
+            Fields: fields,
+            ImageTypeLimit: 1,
+            EnableImageTypes: "Primary,Backdrop,Thumb",
+            StartIndex: request.startIndex,
+            Limit: request.limit,
+            SortBy: request.sortBy,
+            SortOrder: request.sortOrder,
+            EnableTotalRecordCount: true
+          }),
+          headers
+        };
+      case "search":
+        return {
+          method: "GET",
+          url: withQuery(joinJellyfinPath(context.serverUrl, `Users/${userId}/Items`), {
+            SearchTerm: request.query,
+            IncludeItemTypes: request.includeItemTypes.join(","),
+            Recursive: true,
+            IsMissing: false,
+            Fields: fields,
+            ImageTypeLimit: 1,
+            EnableImageTypes: "Primary,Backdrop,Thumb",
+            StartIndex: request.startIndex,
+            Limit: request.limit,
+            EnableTotalRecordCount: true
+          }),
+          headers
+        };
+      case "details":
+        return {
+          method: "GET",
+          url: withQuery(
+            joinJellyfinPath(
+              context.serverUrl,
+              `Users/${userId}/Items/${encodeURIComponent(request.itemId)}`
+            ),
+            { Fields: fields }
+          ),
+          headers
+        };
+      case "episodes":
+        return {
+          method: "GET",
+          url: withQuery(
+            joinJellyfinPath(
+              context.serverUrl,
+              `Shows/${encodeURIComponent(request.seriesId)}/Episodes`
+            ),
+            {
+              UserId: context.userId,
+              SeasonId: request.seasonId,
+              IsMissing: false,
+              EnableUserData: true,
+              Fields: fields,
+              StartIndex: request.startIndex,
+              Limit: request.limit,
+              EnableTotalRecordCount: true
+            }
+          ),
+          headers
+        };
+    }
+  }
+  function buildPlaybackInfoRequest(request, context) {
+    const body = {
+      UserId: context.userId,
+      StartTimeTicks: request.startPositionTicks,
+      MaxStreamingBitrate: request.maxStreamingBitrate,
+      EnableDirectPlay: true,
+      EnableDirectStream: true,
+      EnableTranscoding: true,
+      AllowVideoStreamCopy: true,
+      AllowAudioStreamCopy: true,
+      AutoOpenLiveStream: false,
+      DeviceProfile: createIinaDeviceProfile(request.maxStreamingBitrate)
+    };
+    if (request.mediaSourceId !== void 0) body.MediaSourceId = request.mediaSourceId;
+    if (request.audioStreamIndex !== void 0) body.AudioStreamIndex = request.audioStreamIndex;
+    if (request.subtitleStreamIndex !== void 0)
+      body.SubtitleStreamIndex = request.subtitleStreamIndex;
+    return {
+      method: "POST",
+      url: withQuery(
+        joinJellyfinPath(
+          context.serverUrl,
+          `Items/${encodeURIComponent(request.itemId)}/PlaybackInfo`
+        ),
+        {
+          UserId: context.userId
+        }
+      ),
+      headers: jsonHeaders(context, context.accessToken),
+      body
+    };
   }
 
   // node_modules/.pnpm/zod@3.25.76/node_modules/zod/v3/external.js
@@ -5447,7 +5804,7 @@
     external_exports.object({
       kind: external_exports.literal("home"),
       shelf: external_exports.enum(["continueWatching", "nextUp", "recentlyAdded"]),
-      limit: external_exports.number().int().min(1).max(50).default(20),
+      limit: external_exports.number().int().min(1).max(200).default(20),
       seriesId: identifier.optional()
     }).strict(),
     PageSchema.extend({
@@ -5660,6 +6017,7 @@
     ParentIndexNumber: external_exports.number().int().nullable().optional(),
     SeriesName: shortText.nullable().optional(),
     SeriesId: identifier2.nullable().optional(),
+    SeasonId: identifier2.nullable().optional(),
     ParentBackdropItemId: identifier2.nullable().optional(),
     OfficialRating: external_exports.string().max(128).nullable().optional(),
     CommunityRating: external_exports.number().finite().nullable().optional(),
@@ -5807,6 +6165,154 @@
   }
 
   // packages/core/src/playback.ts
+  var PlaybackSelectionError = class extends Error {
+    code;
+    constructor(code, message) {
+      super(message);
+      this.name = "PlaybackSelectionError";
+      this.code = code;
+    }
+  };
+  function credentialQueryError() {
+    return new PlaybackSelectionError(
+      "CREDENTIAL_QUERY_UNSAFE",
+      "Jellyfin returned a media URL containing credentials; playback was blocked to keep them out of IINA native logs"
+    );
+  }
+  function resolveSafePlaybackUrl(context, returnedUrl) {
+    const resolved = resolveJellyfinUrl(context.serverUrl, returnedUrl);
+    if (hasSecretQueryParameter(resolved)) throw credentialQueryError();
+    return resolved;
+  }
+  function chooseMediaSource(response, requestedId) {
+    if (requestedId === void 0) return response.MediaSources[0];
+    const selected = response.MediaSources.find((source) => source.Id === requestedId);
+    if (selected === void 0) {
+      throw new PlaybackSelectionError(
+        "MEDIA_SOURCE_NOT_FOUND",
+        "The selected media version is no longer available"
+      );
+    }
+    return selected;
+  }
+  function transcodeReasonsFromUrl(url) {
+    const value = queryValueCaseInsensitive(url, "TranscodeReasons");
+    if (value === void 0) return [];
+    return value.split(",").map((reason) => reason.trim()).filter((reason) => reason.length > 0).slice(0, 32);
+  }
+  function staticDirectPlayUrl(context, request, source, playSessionId) {
+    const query = encodeQuery({
+      Static: "true",
+      MediaSourceId: source.Id,
+      PlaySessionId: playSessionId
+    });
+    return `${joinJellyfinPath(context.serverUrl, `Videos/${encodeURIComponent(request.itemId)}/stream`)}?${query}`;
+  }
+  function determineTranscodeConversion(source, transcodeUrl) {
+    const containsVideo = source.MediaStreams.some((stream) => stream.Type === "Video");
+    if (!containsVideo) return "audio";
+    const videoCodec = queryValueCaseInsensitive(transcodeUrl, "VideoCodec")?.toLowerCase();
+    const audioCodec = queryValueCaseInsensitive(transcodeUrl, "AudioCodec")?.toLowerCase();
+    if (videoCodec !== void 0) {
+      if (videoCodec === "copy")
+        return audioCodec === void 0 || audioCodec === "copy" ? "container" : "audio";
+      return "video";
+    }
+    const reasons = transcodeReasonsFromUrl(transcodeUrl);
+    if (reasons.some((reason) => /video|bitrate|subtitle/i.test(reason))) return "video";
+    if (reasons.length > 0 && reasons.every((reason) => /audio/i.test(reason))) return "audio";
+    if (reasons.length > 0 && reasons.every((reason) => /container/i.test(reason)))
+      return "container";
+    return "video";
+  }
+  function selectedAudioIndex(request, source) {
+    if (request.audioStreamIndex !== void 0) return request.audioStreamIndex;
+    return source.DefaultAudioStreamIndex ?? void 0;
+  }
+  function selectedSubtitleIndex(request, source) {
+    if (request.subtitleStreamIndex !== void 0) return request.subtitleStreamIndex;
+    return source.DefaultSubtitleStreamIndex ?? void 0;
+  }
+  function requiredHeaders(source, context) {
+    const allowedServerHeaders = {};
+    for (const [name, value] of Object.entries(source.RequiredHttpHeaders ?? {})) {
+      const normalized = name.toLowerCase();
+      if (!/^[A-Za-z0-9-]{1,128}$/.test(name) || /[\r\n]/.test(value) || ["authorization", "proxy-authorization", "cookie", "host"].includes(normalized)) {
+        continue;
+      }
+      allowedServerHeaders[name] = value;
+    }
+    return {
+      ...allowedServerHeaders,
+      Authorization: createMediaBrowserAuthorization({
+        client: context.client ?? DEFAULT_CLIENT_NAME,
+        device: context.device ?? DEFAULT_DEVICE_NAME,
+        deviceId: context.deviceId,
+        version: context.version,
+        accessToken: context.accessToken
+      })
+    };
+  }
+  function selectPlaybackPlan(rawResponse, request, context) {
+    const response = PlaybackInfoResponseSchema.parse(rawResponse);
+    const source = chooseMediaSource(response, request.mediaSourceId);
+    let url;
+    let playMethod;
+    let conversion;
+    if (source.SupportsDirectPlay) {
+      url = staticDirectPlayUrl(context, request, source, response.PlaySessionId);
+      playMethod = "DirectPlay";
+      conversion = "none";
+    } else if (source.SupportsTranscoding && source.TranscodingUrl) {
+      url = source.TranscodingUrl;
+      conversion = determineTranscodeConversion(source, source.TranscodingUrl);
+      playMethod = source.SupportsDirectStream && conversion !== "video" ? "DirectStream" : "Transcode";
+    } else {
+      throw new PlaybackSelectionError(
+        "NO_PLAYABLE_URL",
+        "Jellyfin did not return a playable URL for this media version"
+      );
+    }
+    const audioStreamIndex = selectedAudioIndex(request, source);
+    const subtitleStreamIndex = selectedSubtitleIndex(request, source);
+    const plan = {
+      itemId: request.itemId,
+      playSessionId: response.PlaySessionId,
+      mediaSourceId: source.Id,
+      url: resolveSafePlaybackUrl(context, url),
+      headers: requiredHeaders(source, context),
+      playMethod,
+      conversion,
+      requiresVideoTranscodeConfirmation: conversion === "video",
+      transcodeReasons: source.TranscodingUrl == null ? [] : transcodeReasonsFromUrl(source.TranscodingUrl),
+      startPositionTicks: request.startPositionTicks
+    };
+    if (audioStreamIndex !== void 0) plan.audioStreamIndex = audioStreamIndex;
+    if (subtitleStreamIndex !== void 0) plan.subtitleStreamIndex = subtitleStreamIndex;
+    if (source.RunTimeTicks != null) plan.runtimeTicks = source.RunTimeTicks;
+    if (subtitleStreamIndex !== void 0 && subtitleStreamIndex >= 0) {
+      const subtitle = source.MediaStreams.find(
+        (stream) => stream.Type === "Subtitle" && stream.Index === subtitleStreamIndex && stream.IsExternal === true
+      );
+      if (subtitle?.DeliveryUrl) {
+        const deliveryUrl = resolveJellyfinUrl(context.serverUrl, subtitle.DeliveryUrl);
+        if (hasSecretQueryParameter(deliveryUrl)) {
+          if (request.subtitleStreamIndex !== void 0) throw credentialQueryError();
+          delete plan.subtitleStreamIndex;
+          return PlaybackPlanSchema.parse(plan);
+        }
+        const externalSubtitle = {
+          index: subtitle.Index,
+          deliveryUrl
+        };
+        if (subtitle.Codec) externalSubtitle.codec = subtitle.Codec;
+        if (subtitle.Language) externalSubtitle.language = subtitle.Language;
+        if (subtitle.DisplayTitle) externalSubtitle.displayTitle = subtitle.DisplayTitle;
+        plan.externalSubtitle = externalSubtitle;
+      }
+    }
+    return PlaybackPlanSchema.parse(plan);
+  }
   function normalizedVolume(level) {
     if (level === void 0 || !Number.isFinite(level)) return 100;
     return Math.max(0, Math.min(100, Math.round(level)));
@@ -6386,8 +6892,16 @@
     const time = Date.now().toString(36);
     return `${prefix}-${time}-${randomHex(20)}`;
   }
+  function createStableDeviceId() {
+    return `iina-${randomHex(8)}-${randomHex(4)}-4${randomHex(3)}-${(8 + Math.floor(Math.random() * 4)).toString(16)}${randomHex(3)}-${randomHex(12)}`;
+  }
 
   // packages/plugin/src/constants.ts
+  var PLUGIN_VERSION = "0.2.0";
+  var KEYCHAIN_SERVICE = "jellyfin-access-token";
+  var KEYCHAIN_ACCOUNT = "active-connection-v1";
+  var CONNECTION_PREFERENCE_KEY = "connectionMetadata";
+  var DEVICE_ID_PREFERENCE_KEY = "deviceId";
   var DEFAULT_PROGRESS_INTERVAL_MS = 1e4;
   var DEFAULT_ARTWORK_LIMIT_BYTES = 8 * 1024 * 1024;
   var SKIP_CHAPTER_TITLES_PREFERENCE_KEY = "skipChapterTitles";
@@ -6396,12 +6910,427 @@
     closed: "jellyfin.player.closed",
     diagnostic: "jellyfin.player.diagnostic",
     launch: "jellyfin.player.launch",
+    linkedLaunch: "jellyfin.player.linked-launch",
     playNext: "jellyfin.player.play-next",
     ready: "jellyfin.player.ready",
     state: "jellyfin.player.state",
     stop: "jellyfin.player.stop",
     upNext: "jellyfin.player.up-next"
   };
+
+  // packages/plugin/src/iina-keychain.ts
+  var KEYCHAIN_UNAVAILABLE_MESSAGE = "IINA's secure Keychain API is unavailable. Restart or update IINA, then try again.";
+  var KEYCHAIN_OPERATION_FAILED_MESSAGE = "macOS Keychain could not complete the secure storage operation.";
+  function createIinaKeychainApi(utils) {
+    const surface = utils;
+    const read = surface.keychainRead ?? surface.keyChainRead;
+    const write = surface.keychainWrite ?? surface.keyChainWrite;
+    return {
+      read(service, name) {
+        if (typeof read !== "function") throw new Error(KEYCHAIN_UNAVAILABLE_MESSAGE);
+        try {
+          return read.call(utils, service, name);
+        } catch {
+          throw new Error(KEYCHAIN_OPERATION_FAILED_MESSAGE);
+        }
+      },
+      write(service, name, password) {
+        if (typeof write !== "function") throw new Error(KEYCHAIN_UNAVAILABLE_MESSAGE);
+        try {
+          return write.call(utils, service, name, password);
+        } catch {
+          throw new Error(KEYCHAIN_OPERATION_FAILED_MESSAGE);
+        }
+      }
+    };
+  }
+
+  // packages/plugin/src/jellyfin-client.ts
+  function requiredString(record, key) {
+    const value = record[key];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`Jellyfin response is missing ${key}.`);
+    }
+    return value;
+  }
+  function recordValue(value) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Jellyfin returned an unexpected response.");
+    }
+    return value;
+  }
+  var JellyfinClient = class {
+    constructor(transport, identity) {
+      this.transport = transport;
+      this.identity = identity;
+    }
+    transport;
+    identity;
+    async probe(serverInput, allowInsecureRemote = false) {
+      const address = normalizeServerUrl(serverInput, { allowInsecureRemote });
+      const raw = await this.transport.execute(buildPublicServerInfoRequest(address.url));
+      return { address, server: PublicSystemInfoSchema.parse(raw) };
+    }
+    async loginWithPassword(input) {
+      const { address, server } = await this.probe(input.serverUrl, input.allowInsecureRemote);
+      const raw = await this.transport.execute(
+        buildPasswordAuthenticationRequest(address.url, this.identity, {
+          username: input.username,
+          password: input.password
+        })
+      );
+      const authentication = AuthenticationResultSchema.parse(raw);
+      return {
+        metadata: {
+          schemaVersion: 1,
+          serverUrl: address.url,
+          serverId: authentication.ServerId || server.Id,
+          serverName: server.ServerName,
+          userId: authentication.User.Id,
+          username: authentication.User.Name,
+          deviceId: this.identity.deviceId,
+          acceptedInsecureRemote: address.policy === "remote-http-accepted" && input.allowInsecureRemote,
+          lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString()
+        },
+        accessToken: authentication.AccessToken
+      };
+    }
+    async startQuickConnect(input) {
+      const { address, server } = await this.probe(input.serverUrl, input.allowInsecureRemote);
+      const raw = recordValue(
+        await this.transport.execute(buildQuickConnectInitiateRequest(address.url, this.identity))
+      );
+      return {
+        serverUrl: address.url,
+        server,
+        secret: requiredString(raw, "Secret"),
+        code: requiredString(raw, "Code"),
+        allowInsecureRemote: input.allowInsecureRemote,
+        startedAt: Date.now()
+      };
+    }
+    async pollQuickConnect(attempt) {
+      if (Date.now() - attempt.startedAt > 10 * 60 * 1e3) {
+        throw new Error("The Quick Connect code expired. Start again for a new code.");
+      }
+      const statusRaw = recordValue(
+        await this.transport.execute(
+          buildQuickConnectStatusRequest(attempt.serverUrl, this.identity, attempt.secret)
+        )
+      );
+      const status = {
+        Authenticated: statusRaw.Authenticated === true
+      };
+      if (!status.Authenticated) return { authenticated: false };
+      const raw = await this.transport.execute(
+        buildQuickConnectAuthenticationRequest(attempt.serverUrl, this.identity, attempt.secret)
+      );
+      const authentication = AuthenticationResultSchema.parse(raw);
+      const address = normalizeServerUrl(attempt.serverUrl, {
+        allowInsecureRemote: attempt.allowInsecureRemote
+      });
+      return {
+        authenticated: true,
+        metadata: {
+          schemaVersion: 1,
+          serverUrl: attempt.serverUrl,
+          serverId: authentication.ServerId || attempt.server.Id,
+          serverName: attempt.server.ServerName,
+          userId: authentication.User.Id,
+          username: authentication.User.Name,
+          deviceId: this.identity.deviceId,
+          acceptedInsecureRemote: address.policy === "remote-http-accepted" && attempt.allowInsecureRemote,
+          lastConnectedAt: (/* @__PURE__ */ new Date()).toISOString()
+        },
+        accessToken: authentication.AccessToken
+      };
+    }
+    async reportSessionEnded(context) {
+      await this.transport.execute(buildSessionLogoutRequest(context));
+    }
+    async queryCatalog(request, context) {
+      const raw = await this.transport.execute(buildCatalogRequest(request, context));
+      if (request.kind === "details") return BaseItemSchema.parse(raw);
+      if (request.kind === "home" && request.shelf === "recentlyAdded" && Array.isArray(raw)) {
+        return raw.map((item) => BaseItemSchema.parse(item));
+      }
+      return ItemsResultSchema.parse(raw);
+    }
+    async createPlaybackPlan(request, context) {
+      const response = PlaybackInfoResponseSchema.parse(
+        await this.transport.execute(buildPlaybackInfoRequest(request, context))
+      );
+      return selectPlaybackPlan(response, request, context);
+    }
+  };
+
+  // packages/plugin/src/media-link.ts
+  var MEDIA_LINK_PREFIX = "null://jellyfin/";
+  var MAX_LINK_LENGTH = 4096;
+  var MAX_IDENTIFIER_LENGTH = 512;
+  var MAX_TITLE_LENGTH = 512;
+  var MAX_REFERENCE_FILENAME_BYTES = 180;
+  function validIdentifier(value) {
+    return value.length > 0 && value.length <= MAX_IDENTIFIER_LENGTH && !containsUnsafeDisplayCharacter(value);
+  }
+  function containsUnsafeDisplayCharacter(value) {
+    return /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(value);
+  }
+  function normalizedTitle(value) {
+    const normalized = [...value].map((character) => containsUnsafeDisplayCharacter(character) ? " " : character).join("").replace(/\s+/g, " ").trim();
+    const title = [...normalized].slice(0, MAX_TITLE_LENGTH).join("");
+    return title.length > 0 ? title : "Jellyfin media";
+  }
+  function normalizeJellyfinMediaTitle(value) {
+    return normalizedTitle(value);
+  }
+  function utf8Length(value) {
+    let length = 0;
+    for (const character of value) {
+      const point = character.codePointAt(0) ?? 0;
+      length += point <= 127 ? 1 : point <= 2047 ? 2 : point <= 65535 ? 3 : 4;
+    }
+    return length;
+  }
+  function truncateUtf8(value, maximumBytes) {
+    let result = "";
+    let bytes = 0;
+    for (const character of value) {
+      const characterBytes = utf8Length(character);
+      if (bytes + characterBytes > maximumBytes) break;
+      result += character;
+      bytes += characterBytes;
+    }
+    return result;
+  }
+  function referenceFilename(title) {
+    const safe = normalizedTitle(title).normalize("NFC").replace(/[\\/:]/g, " ").replace(/\s+/g, " ").replace(/^[. ]+|[. ]+$/g, "").trim();
+    const bounded = truncateUtf8(safe || "Jellyfin media", MAX_REFERENCE_FILENAME_BYTES).trim();
+    return bounded.length > 0 ? bounded : "Jellyfin media";
+  }
+  function hash32(value, seed) {
+    let hash = seed >>> 0;
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  }
+  function referenceDisambiguator(input) {
+    const identity = `${input.serverId}\0${input.itemId}`;
+    return `${hash32(identity, 2166136261)}${hash32(identity, 2654435769)}`;
+  }
+  function createJellyfinMediaLink(input) {
+    if (!validIdentifier(input.serverId) || !validIdentifier(input.itemId)) {
+      throw new TypeError("Invalid Jellyfin media link identifier.");
+    }
+    const prefix = `${MEDIA_LINK_PREFIX}${encodeURIComponent(input.serverId)}/${encodeURIComponent(input.itemId)}/`;
+    const encodedTitle = [];
+    let length = prefix.length;
+    for (const character of normalizedTitle(input.title)) {
+      const encoded = encodeURIComponent(character);
+      if (length + encoded.length > MAX_LINK_LENGTH) break;
+      encodedTitle.push(encoded);
+      length += encoded.length;
+    }
+    if (encodedTitle.length === 0) throw new TypeError("Jellyfin media link is too long.");
+    const link = `${prefix}${encodedTitle.join("")}`;
+    return link;
+  }
+  function parseJellyfinMediaLink(value) {
+    if (typeof value !== "string" || value.length > MAX_LINK_LENGTH || !value.startsWith(MEDIA_LINK_PREFIX)) {
+      return void 0;
+    }
+    const segments = value.slice(MEDIA_LINK_PREFIX.length).split("/");
+    if (segments.length !== 3 || segments.some((segment) => segment.length === 0)) return void 0;
+    try {
+      const serverId = decodeURIComponent(segments[0]);
+      const itemId = decodeURIComponent(segments[1]);
+      const title = decodeURIComponent(segments[2]);
+      if (!validIdentifier(serverId) || !validIdentifier(itemId) || title.length === 0 || [...title].length > MAX_TITLE_LENGTH || containsUnsafeDisplayCharacter(title)) {
+        return void 0;
+      }
+      return { serverId, itemId, title };
+    } catch {
+      return void 0;
+    }
+  }
+  function createJellyfinMediaReference(input) {
+    const document = createJellyfinMediaLink(input);
+    const parsed = parseJellyfinMediaLink(document);
+    if (parsed === void 0) throw new TypeError("Invalid Jellyfin media reference.");
+    const filename = referenceFilename(parsed.title);
+    return {
+      dataPath: `@data/${filename} · jf-${referenceDisambiguator(parsed)}`,
+      document
+    };
+  }
+  function matchesJellyfinMediaReferencePath(path, dataRoot, input) {
+    if (typeof path !== "string" || typeof dataRoot !== "string" || !path.startsWith("/")) {
+      return false;
+    }
+    const root = dataRoot.replace(/\/+$/, "");
+    if (root.length === 0 || !path.startsWith(`${root}/`)) return false;
+    const relative = path.slice(root.length + 1);
+    if (relative.length === 0 || relative.includes("/")) return false;
+    const { dataPath } = createJellyfinMediaReference(input);
+    return dataPath.slice("@data/".length).normalize("NFC") === relative.normalize("NFC");
+  }
+
+  // packages/plugin/src/media-playability.ts
+  function assertPlayableMediaItem(item) {
+    if (item.Type !== "Movie" && item.Type !== "Episode") {
+      throw new Error("Only Jellyfin movies and episodes can be played.");
+    }
+    if (item.IsPlaceHolder === true || item.LocationType === "Virtual" || item.LocationType === "Offline") {
+      throw new Error("This Jellyfin item is not available for playback.");
+    }
+  }
+
+  // packages/plugin/src/native-playlist.ts
+  var MAX_EPISODES_PER_DIRECTION = 100;
+  function playableEpisode(item) {
+    return item.Type === "Episode" && item.IsPlaceHolder !== true && item.LocationType !== "Virtual" && item.LocationType !== "Offline";
+  }
+  function episodeOrder(left, right) {
+    const season = (left.ParentIndexNumber ?? Number.MAX_SAFE_INTEGER) - (right.ParentIndexNumber ?? Number.MAX_SAFE_INTEGER);
+    if (season !== 0) return season;
+    const episode = (left.IndexNumber ?? Number.MAX_SAFE_INTEGER) - (right.IndexNumber ?? Number.MAX_SAFE_INTEGER);
+    if (episode !== 0) return episode;
+    return left.Name.localeCompare(right.Name);
+  }
+  function selectSeasonPlaylistEpisodes(items, currentItemId, seasonNumber) {
+    const current = items.find((item) => item.Id === currentItemId && playableEpisode(item));
+    const effectiveSeasonNumber = seasonNumber ?? current?.ParentIndexNumber;
+    if (current === void 0 || effectiveSeasonNumber === void 0) {
+      return { before: [], after: [] };
+    }
+    const seen = /* @__PURE__ */ new Set();
+    const candidates = items.filter((item) => {
+      if (!playableEpisode(item) || item.ParentIndexNumber !== effectiveSeasonNumber || seen.has(item.Id)) {
+        return false;
+      }
+      seen.add(item.Id);
+      return true;
+    }).sort(episodeOrder);
+    const currentIndex = candidates.findIndex((item) => item.Id === currentItemId);
+    if (currentIndex < 0) return { before: [], after: [] };
+    return {
+      before: candidates.slice(Math.max(0, currentIndex - MAX_EPISODES_PER_DIRECTION), currentIndex),
+      after: candidates.slice(currentIndex + 1, currentIndex + 1 + MAX_EPISODES_PER_DIRECTION)
+    };
+  }
+  function serializeNativePlaylist(entries) {
+    const lines = ["#EXTM3U"];
+    for (const entry of entries) {
+      if (!entry.location.startsWith("/") || /[\r\n\0]/.test(entry.location) || entry.title.length === 0 || /[\r\n\0]/.test(entry.title)) {
+        throw new TypeError("Invalid native Jellyfin playlist entry.");
+      }
+      lines.push(`#EXTINF:-1,${entry.title}`, entry.location);
+    }
+    return `${lines.join("\n")}
+`;
+  }
+
+  // packages/plugin/src/persistence.ts
+  var ConnectionStore = class {
+    constructor(preferences, keychain) {
+      this.preferences = preferences;
+      this.keychain = keychain;
+    }
+    preferences;
+    keychain;
+    getDeviceId() {
+      const current = this.preferences.get(DEVICE_ID_PREFERENCE_KEY);
+      if (typeof current === "string" && current.length >= 16) return current;
+      const created = createStableDeviceId();
+      this.preferences.set(DEVICE_ID_PREFERENCE_KEY, created);
+      this.preferences.sync();
+      return created;
+    }
+    readMetadata() {
+      const value = this.preferences.get(CONNECTION_PREFERENCE_KEY);
+      if (typeof value !== "string" || value.trim() === "") return void 0;
+      try {
+        return ConnectionMetadataSchema.parse(JSON.parse(value));
+      } catch {
+        return void 0;
+      }
+    }
+    readAccessToken(metadata) {
+      const value = this.keychain.read(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      if (typeof value !== "string" || value.length === 0) return void 0;
+      try {
+        const envelope = JSON.parse(value);
+        return envelope.version === 1 && envelope.serverUrl === metadata.serverUrl && envelope.serverId === metadata.serverId && envelope.userId === metadata.userId && typeof envelope.accessToken === "string" && envelope.accessToken.length > 0 ? envelope.accessToken : void 0;
+      } catch {
+        return void 0;
+      }
+    }
+    save(metadata, accessToken) {
+      if (accessToken.length === 0) throw new TypeError("Access token cannot be empty");
+      const validated = ConnectionMetadataSchema.parse(metadata);
+      const previousCredential = this.keychain.read(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      const envelope = {
+        version: 1,
+        serverUrl: validated.serverUrl,
+        serverId: validated.serverId,
+        userId: validated.userId,
+        accessToken
+      };
+      if (!this.keychain.write(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, JSON.stringify(envelope))) {
+        throw new Error("macOS Keychain did not accept the Jellyfin access token.");
+      }
+      const previousPreference = this.preferences.get(CONNECTION_PREFERENCE_KEY);
+      try {
+        this.preferences.set(CONNECTION_PREFERENCE_KEY, JSON.stringify(validated));
+        this.preferences.sync();
+      } catch (error) {
+        let rollbackFailed = false;
+        try {
+          rollbackFailed = !this.keychain.write(
+            KEYCHAIN_SERVICE,
+            KEYCHAIN_ACCOUNT,
+            typeof previousCredential === "string" ? previousCredential : ""
+          );
+        } catch {
+          rollbackFailed = true;
+        }
+        try {
+          this.preferences.set(CONNECTION_PREFERENCE_KEY, previousPreference ?? "");
+          this.preferences.sync();
+        } catch {
+          rollbackFailed = true;
+        }
+        if (rollbackFailed) {
+          throw new Error(
+            "The previous Jellyfin connection could not be restored safely. Please reconnect."
+          );
+        }
+        throw error;
+      }
+    }
+    clear() {
+      if (!this.keychain.write(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, "")) {
+        throw new Error("macOS Keychain did not remove the Jellyfin access token.");
+      }
+      this.preferences.set(CONNECTION_PREFERENCE_KEY, "");
+      this.preferences.sync();
+    }
+  };
+
+  // packages/plugin/src/player-messages.ts
+  function displayMetadataFromItem(item) {
+    const display = { title: item.Name };
+    if (item.SeriesName != null) display.seriesName = item.SeriesName;
+    if (item.SeriesId != null) display.seriesId = item.SeriesId;
+    if (item.SeasonId != null) display.seasonId = item.SeasonId;
+    if (item.ParentIndexNumber != null) display.seasonNumber = item.ParentIndexNumber;
+    if (item.IndexNumber != null) display.episodeNumber = item.IndexNumber;
+    if (item.Overview != null) display.overview = item.Overview;
+    if (item.RunTimeTicks != null) display.runtimeTicks = item.RunTimeTicks;
+    return display;
+  }
 
   // packages/plugin/src/playback-state-mailbox.ts
   var PLAYBACK_STATE_FILE_PREFIX = "jellyfin-playback-state-";
@@ -6422,6 +7351,12 @@
       this.name = "StalePlayerLoadError";
     }
   };
+  var VideoTranscodeConfirmationRequiredError = class extends Error {
+    constructor() {
+      super("Video transcoding requires confirmation in the Jellyfin library.");
+      this.name = "VideoTranscodeConfirmationRequiredError";
+    }
+  };
   var MAX_EXTERNAL_SUBTITLE_BYTES = 10 * 1024 * 1024;
   var CORE_STOP_ACK_TIMEOUT_MS = 750;
   var CHAPTER_SKIP_PROMPT_MS = 1e4;
@@ -6430,6 +7365,10 @@
   var MAX_CHAPTER_SKIP_TITLES = 32;
   var MAX_CHAPTER_TITLE_LENGTH = 128;
   var MAX_CHAPTER_SKIP_PREFERENCE_LENGTH = 4096;
+  var PLAYLIST_EPISODE_PAGE_SIZE = 200;
+  var MAX_PLAYLIST_EPISODES_SCANNED = 2e3;
+  var MAX_STALE_MEDIA_LINKS = 32;
+  var STALE_MEDIA_LINK_TTL_MS = 5e3;
   var WEBVIEW_ERROR_CATEGORIES = /* @__PURE__ */ new Set([
     "Error",
     "TypeError",
@@ -6530,6 +7469,9 @@
     }
     return display.title;
   }
+  function mediaLinkIdentity(value) {
+    return value === void 0 ? void 0 : `${value.serverId}\0${value.itemId}`;
+  }
   var PlayerRuntime = class {
     constructor(api2, transport, logger2) {
       this.api = api2;
@@ -6571,6 +7513,13 @@
     handledChapterKey;
     unavailableChapterKey;
     pendingFinalChapterSkip;
+    playlistRefreshSequence = 0;
+    ownedPlaylistLinks = /* @__PURE__ */ new Set();
+    queuedMediaReferences = /* @__PURE__ */ new Map();
+    staleOwnedMediaLinks = /* @__PURE__ */ new Map();
+    eofCompletedGeneration = -1;
+    heldCompletedPositionSeconds;
+    globalPlaybackId;
     install() {
       this.readChapterSkipPreferences();
       this.api.global.onMessage(PLAYER_MESSAGES.launch, (raw) => this.receiveLaunch(raw));
@@ -6594,16 +7543,20 @@
       this.api.event.on("mpv.paused-for-cache.changed", () => this.playbackTimingChanged());
       this.api.event.on("mpv.chapter.changed", () => this.reconcileChapterSkip());
       this.api.event.on("mpv.duration.changed", () => this.reconcileChapterSkip());
+      this.api.event.on("mpv.eof-reached.changed", () => this.eofReachedChanged());
       this.api.event.on("mpv.seek", () => void this.reportImmediate("seek"));
       this.api.event.on("mpv.end-file", () => {
         this.handleEndFile();
       });
       this.api.event.on("iina.window-will-close", () => {
+        if (this.globalPlaybackId !== void 0) this.notifyPlaybackReleased(this.globalPlaybackId);
         this.clearProgressTimer();
         this.clearSidebarRecoveryTimer();
         this.clearChapterSkip(true);
         this.resetChapterTracking();
         this.pendingFinalChapterSkip = void 0;
+        this.playlistRefreshSequence += 1;
+        this.discardOwnedPlaylistState();
         this.replacementSequence += 1;
         this.discardPendingHandoffs();
         this.invalidatePendingLoads();
@@ -6614,13 +7567,15 @@
     receiveLaunch(raw) {
       if (raw === null || typeof raw !== "object") return;
       const candidate = raw;
-      if (typeof candidate.nonce !== "string" || candidate.context === void 0 || candidate.display === void 0) {
+      if (typeof candidate.nonce !== "string" || typeof candidate.serverId !== "string" || candidate.connection === void 0 || typeof candidate.connection.serverId !== "string" || typeof candidate.connection.userId !== "string" || typeof candidate.connection.lastConnectedAt !== "string" || candidate.context === void 0 || candidate.display === void 0) {
         return;
       }
       const parsed = PlaybackPlanSchema.safeParse(candidate.plan);
       if (!parsed.success) return;
       const launch = {
         nonce: candidate.nonce,
+        serverId: candidate.serverId,
+        connection: candidate.connection,
         plan: parsed.data,
         context: candidate.context,
         display: candidate.display
@@ -6628,10 +7583,12 @@
       if (typeof candidate.diagnosticCorrelation === "string" && candidate.diagnosticCorrelation.length <= 512) {
         launch.diagnosticCorrelation = candidate.diagnosticCorrelation;
       }
+      this.globalPlaybackId = launch.nonce;
       this.ensureProgressTimer();
       this.clearChapterSkip(true);
       this.resetChapterTracking();
       this.pendingFinalChapterSkip = void 0;
+      this.discardPendingHandoffs();
       const sequence = ++this.replacementSequence;
       this.invalidatePendingLoads();
       this.enqueueControl(() => this.replace(launch, sequence));
@@ -6714,8 +7671,8 @@
       }
       const chapters = this.api.core.getChapters();
       const current = chapters[chapterIndex];
-      const normalizedTitle = current?.title.trim().toLowerCase();
-      if (normalizedTitle === void 0 || !this.chapterSkipTitles.includes(normalizedTitle)) {
+      const normalizedTitle2 = current?.title.trim().toLowerCase();
+      if (normalizedTitle2 === void 0 || !this.chapterSkipTitles.includes(normalizedTitle2)) {
         this.clearChapterSkip(true);
         return;
       }
@@ -6823,14 +7780,74 @@
     }
     async resolveLoad(next) {
       const original = this.api.mpv.getString("stream-open-filename");
-      if (original !== "null://") {
+      const linkedMedia = this.parseMediaReference(original);
+      if (linkedMedia !== void 0 || original !== "null://") {
+        this.heldCompletedPositionSeconds = void 0;
+      }
+      const consumed = this.consumePendingLaunch(original);
+      if (consumed === null) {
+        next?.();
+        return;
+      }
+      let pending = consumed;
+      if (pending === void 0 && linkedMedia !== void 0) {
+        const ownedLaunch = this.launch;
+        const previousPlaybackId = this.globalPlaybackId;
+        const ownedGeneration = this.session.generation;
+        const sequence = ++this.replacementSequence;
+        this.discardPendingHandoffs();
+        this.invalidatePendingLoads();
+        this.playlistRefreshSequence += 1;
+        try {
+          if (ownedLaunch !== void 0) await this.releaseForExternalLoad(false);
+          const launch = await this.prepareLinkedLaunch(linkedMedia, sequence);
+          pending = { launch, replacementSequence: sequence, mediaLink: original };
+          this.api.global.postMessage(PLAYER_MESSAGES.linkedLaunch, {
+            playbackId: launch.nonce,
+            connection: launch.connection,
+            ...previousPlaybackId === void 0 ? {} : { previousPlaybackId }
+          });
+        } catch (error) {
+          if (error instanceof StalePlayerLoadError || sequence !== this.replacementSequence) {
+            next?.();
+            return;
+          }
+          if (previousPlaybackId !== void 0) this.notifyPlaybackReleased(previousPlaybackId);
+          if (ownedLaunch !== void 0) {
+            this.cleanupPlaybackIfOwned(ownedLaunch, ownedGeneration);
+            this.sidebarPresented = false;
+            this.publishState();
+          }
+          this.clearOwnedPlaylistEntries();
+          this.clearMediaCredentials();
+          this.api.mpv.set("file-local-options/keep-open", "always");
+          this.api.mpv.set("stream-open-filename", "null://");
+          if (error instanceof VideoTranscodeConfirmationRequiredError) {
+            this.logger.info("player.linked-media.transcode-confirmation-required");
+            this.api.core.osd(
+              "Open this item from the Jellyfin library to approve video conversion."
+            );
+          } else {
+            this.logger.warn("Could not prepare a linked Jellyfin item", error);
+            this.api.core.osd(
+              "This Jellyfin item could not be opened. Reconnect or use the library."
+            );
+          }
+          next?.();
+          return;
+        }
+      }
+      if (pending === void 0 && linkedMedia === void 0 && original !== "null://") {
         const ownedLaunch = this.launch;
         const ownedGeneration = this.session.generation;
         this.replacementSequence += 1;
         this.discardPendingHandoffs();
         this.invalidatePendingLoads();
+        this.clearOwnedPlaylistEntries();
         try {
-          if (ownedLaunch !== void 0) await this.releaseForExternalLoad();
+          if (ownedLaunch !== void 0 || this.globalPlaybackId !== void 0) {
+            await this.releaseForExternalLoad();
+          }
         } catch (error) {
           this.logger.warn("Could not release Jellyfin playback for an external load", error);
         } finally {
@@ -6844,14 +7861,6 @@
         }
         return;
       }
-      let pending;
-      while (this.pendingLaunchesForHook.length > 0) {
-        const candidate = this.pendingLaunchesForHook.shift();
-        if (candidate?.replacementSequence === this.replacementSequence) {
-          pending = candidate;
-          break;
-        }
-      }
       if (pending === void 0) {
         next?.();
         return;
@@ -6861,6 +7870,7 @@
       try {
         const launch = pending.launch;
         this.launch = launch;
+        this.globalPlaybackId = launch.nonce;
         this.activeLoadReplacementSequence = pending.replacementSequence;
         this.session = beginPlaybackSession(this.session, launch.plan);
         this.playbackStartedAtMs = Date.now();
@@ -6918,6 +7928,7 @@
             this.publishState();
             this.api.mpv.set("stream-open-filename", "null://");
           } finally {
+            this.notifyPlaybackReleased(failedLaunch.nonce);
             this.cleanupPlaybackIfOwned(failedLaunch, generation);
           }
           await report;
@@ -6929,6 +7940,179 @@
         }
       } finally {
         next?.();
+      }
+    }
+    consumePendingLaunch(mediaLink) {
+      const requested = this.parseMediaReference(mediaLink);
+      const identity = mediaLinkIdentity(requested);
+      let pending;
+      for (let index = this.pendingLaunchesForHook.length - 1; index >= 0; index -= 1) {
+        const candidate = this.pendingLaunchesForHook[index];
+        if (candidate === void 0) continue;
+        if (candidate.replacementSequence !== this.replacementSequence) {
+          this.pendingLaunchesForHook.splice(index, 1);
+          this.markStaleMediaLink(candidate.mediaLink);
+          continue;
+        }
+        const candidateLink = this.parseMediaReference(candidate.mediaLink);
+        if (pending === void 0 && (candidate.mediaLink === mediaLink || requested !== void 0 && candidateLink?.serverId === requested.serverId && candidateLink.itemId === requested.itemId)) {
+          this.pendingLaunchesForHook.splice(index, 1);
+          pending = candidate;
+        }
+      }
+      if (pending !== void 0) {
+        if (identity !== void 0) this.staleOwnedMediaLinks.delete(identity);
+        return pending;
+      }
+      return identity !== void 0 && this.consumeStaleMediaLink(identity) ? null : void 0;
+    }
+    parseMediaReference(value) {
+      const legacy = parseJellyfinMediaLink(value);
+      if (legacy !== void 0) return legacy;
+      if (typeof value !== "string" || !value.startsWith("/")) return void 0;
+      try {
+        const dataRoot = this.api.utils.resolvePath("@data/");
+        if (typeof dataRoot !== "string" || !dataRoot.startsWith("/")) return void 0;
+        const root = dataRoot.replace(/\/+$/, "");
+        if (!value.startsWith(`${root}/`)) return void 0;
+        const relative = value.slice(root.length + 1);
+        if (relative.length === 0 || relative.length > 512 || relative.includes("/"))
+          return void 0;
+        const queued = this.queuedMediaReferences.get(value);
+        if (queued !== void 0) {
+          if (!matchesJellyfinMediaReferencePath(value, dataRoot, queued.media)) return void 0;
+          if (!this.api.file.exists(queued.dataPath)) {
+            this.api.file.write(queued.dataPath, queued.document);
+          } else if (this.readMediaReferenceDocument(queued.dataPath) !== queued.document) {
+            return void 0;
+          }
+          this.queuedMediaReferences.delete(value);
+          return queued.media;
+        }
+        const raw = this.readMediaReferenceDocument(value);
+        if (raw === void 0) return void 0;
+        const parsed = parseJellyfinMediaLink(raw);
+        return parsed !== void 0 && matchesJellyfinMediaReferencePath(value, dataRoot, parsed) ? parsed : void 0;
+      } catch {
+        return void 0;
+      }
+    }
+    readMediaReferenceDocument(path) {
+      let handle;
+      try {
+        handle = this.api.file.handle(path, "read") ?? void 0;
+        if (handle === void 0) return void 0;
+        const raw = handle.read(4097);
+        if (raw === null || raw === void 0 || typeof raw === "string") return void 0;
+        const bytes = Array.from(raw);
+        if (bytes.length > 4096 || bytes.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 127)) {
+          return void 0;
+        }
+        return String.fromCharCode(...bytes);
+      } catch {
+        return void 0;
+      } finally {
+        try {
+          handle?.close();
+        } catch {
+        }
+      }
+    }
+    ensureMediaReference(input) {
+      const reference = createJellyfinMediaReference(input);
+      const dataRoot = this.api.utils.resolvePath("@data/");
+      if (typeof dataRoot !== "string" || !dataRoot.startsWith("/")) {
+        throw new Error("IINA could not resolve the plugin-private data path.");
+      }
+      if (this.api.file.exists(reference.dataPath)) {
+        if (this.readMediaReferenceDocument(reference.dataPath) !== reference.document) {
+          throw new Error("The Jellyfin history reference is occupied by another item.");
+        }
+      } else {
+        this.api.file.write(reference.dataPath, reference.document);
+      }
+      const resolved = this.api.utils.resolvePath(reference.dataPath);
+      if (typeof resolved === "string" && matchesJellyfinMediaReferencePath(resolved, dataRoot, input)) {
+        return resolved;
+      }
+      throw new Error("IINA could not create the Jellyfin history reference.");
+    }
+    reserveMediaReference(input) {
+      const reference = createJellyfinMediaReference(input);
+      const media = parseJellyfinMediaLink(reference.document);
+      const dataRoot = this.api.utils.resolvePath("@data/");
+      if (media === void 0 || typeof dataRoot !== "string" || !dataRoot.startsWith("/")) {
+        throw new Error("IINA could not prepare a Jellyfin playlist reference.");
+      }
+      const resolved = this.api.utils.resolvePath(reference.dataPath);
+      if (typeof resolved !== "string" || !matchesJellyfinMediaReferencePath(resolved, dataRoot, media)) {
+        throw new Error("IINA could not resolve the Jellyfin playlist reference.");
+      }
+      const reserved = this.queuedMediaReferences.get(resolved);
+      if (reserved !== void 0 && (reserved.media.serverId !== media.serverId || reserved.media.itemId !== media.itemId)) {
+        throw new Error("The Jellyfin playlist reference is occupied by another item.");
+      }
+      if (this.api.file.exists(reference.dataPath) && this.readMediaReferenceDocument(reference.dataPath) !== reference.document) {
+        throw new Error("The Jellyfin playlist reference does not match its item.");
+      }
+      this.queuedMediaReferences.set(resolved, { ...reference, media });
+      return resolved;
+    }
+    async prepareLinkedLaunch(link, replacementSequence) {
+      const store = new ConnectionStore(this.api.preferences, createIinaKeychainApi(this.api.utils));
+      const metadata = store.readMetadata();
+      if (metadata === void 0 || metadata.serverId !== link.serverId) {
+        throw new Error("The saved Jellyfin connection does not match this media item.");
+      }
+      const accessToken = store.readAccessToken(metadata);
+      if (accessToken === void 0) throw new Error("The saved Jellyfin session is unavailable.");
+      const context = {
+        serverUrl: metadata.serverUrl,
+        userId: metadata.userId,
+        accessToken,
+        deviceId: metadata.deviceId,
+        version: PLUGIN_VERSION
+      };
+      const client = new JellyfinClient(this.transport, {
+        deviceId: metadata.deviceId,
+        version: PLUGIN_VERSION
+      });
+      const details = BaseItemSchema.parse(
+        await client.queryCatalog({ kind: "details", itemId: link.itemId }, context)
+      );
+      if (replacementSequence !== this.replacementSequence) throw new StalePlayerLoadError();
+      this.assertLinkedConnectionCurrent(store, metadata, accessToken);
+      if (details.Id !== link.itemId) throw new Error("Jellyfin returned a different media item.");
+      assertPlayableMediaItem(details);
+      const request = PlaybackRequestSchema.parse({
+        itemId: details.Id,
+        startPositionTicks: details.UserData?.Played === true ? 0 : details.UserData?.PlaybackPositionTicks ?? 0,
+        openInNewWindow: false
+      });
+      const plan = await client.createPlaybackPlan(request, context);
+      if (replacementSequence !== this.replacementSequence) throw new StalePlayerLoadError();
+      this.assertLinkedConnectionCurrent(store, metadata, accessToken);
+      if (plan.requiresVideoTranscodeConfirmation) {
+        throw new VideoTranscodeConfirmationRequiredError();
+      }
+      return {
+        nonce: createOpaqueId("play"),
+        serverId: metadata.serverId,
+        connection: {
+          serverId: metadata.serverId,
+          userId: metadata.userId,
+          lastConnectedAt: metadata.lastConnectedAt
+        },
+        diagnosticCorrelation: createOpaqueId("diagnostic-playback"),
+        plan,
+        context,
+        display: displayMetadataFromItem(details)
+      };
+    }
+    assertLinkedConnectionCurrent(store, expected, expectedAccessToken) {
+      const current = store.readMetadata();
+      if (current === void 0 || current.serverId !== expected.serverId || current.userId !== expected.userId || current.lastConnectedAt !== expected.lastConnectedAt || store.readAccessToken(current) !== expectedAccessToken) {
+        throw new StalePlayerLoadError();
       }
     }
     async downloadExternalSubtitle(launch, loadSequence, generation) {
@@ -7013,7 +8197,143 @@
         startReport = this.sendReport("start");
       }
       this.reconcileChapterSkip();
+      void this.refreshNativePlaylist(this.launch, generation);
       if (startReport !== void 0) await startReport;
+    }
+    async refreshNativePlaylist(launch, generation) {
+      const refreshSequence = ++this.playlistRefreshSequence;
+      const seriesId = launch.display.seriesId;
+      if (seriesId === void 0) return;
+      const identity = {
+        deviceId: launch.context.deviceId,
+        version: launch.context.version
+      };
+      if (launch.context.client !== void 0) identity.client = launch.context.client;
+      if (launch.context.device !== void 0) identity.device = launch.context.device;
+      const client = new JellyfinClient(this.transport, identity);
+      const refreshReservations = [];
+      let retainReservations = false;
+      try {
+        const episodes = [];
+        let startIndex = 0;
+        while (episodes.length < MAX_PLAYLIST_EPISODES_SCANNED) {
+          const result = ItemsResultSchema.parse(
+            await client.queryCatalog(
+              {
+                kind: "episodes",
+                seriesId,
+                seasonId: launch.display.seasonId,
+                startIndex,
+                limit: PLAYLIST_EPISODE_PAGE_SIZE
+              },
+              launch.context
+            )
+          );
+          if (refreshSequence !== this.playlistRefreshSequence || this.launch !== launch || this.session.generation !== generation) {
+            return;
+          }
+          episodes.push(...result.Items);
+          const nextStart = result.StartIndex + result.Items.length;
+          if (result.Items.length === 0 || nextStart <= startIndex || nextStart >= result.TotalRecordCount) {
+            break;
+          }
+          const selected2 = selectSeasonPlaylistEpisodes(
+            episodes,
+            launch.plan.itemId,
+            launch.display.seasonNumber
+          );
+          if (selected2.after.length >= 100) break;
+          startIndex = nextStart;
+        }
+        const selected = selectSeasonPlaylistEpisodes(
+          episodes,
+          launch.plan.itemId,
+          launch.display.seasonNumber
+        );
+        if (refreshSequence !== this.playlistRefreshSequence || this.launch !== launch || this.session.generation !== generation) {
+          return;
+        }
+        this.clearOwnedPlaylistEntries();
+        const existing = this.api.playlist.list();
+        const currentIndex = existing.findIndex((item) => item.isPlaying);
+        const playlistEntries = [];
+        for (const episode of [...selected.before, ...selected.after]) {
+          if (refreshSequence !== this.playlistRefreshSequence || this.launch !== launch || this.session.generation !== generation) {
+            return;
+          }
+          const title = normalizeJellyfinMediaTitle(mediaTitle(displayMetadataFromItem(episode)));
+          const location = this.reserveMediaReference({
+            serverId: launch.serverId,
+            itemId: episode.Id,
+            title
+          });
+          refreshReservations.push(location);
+          playlistEntries.push({ location, title });
+        }
+        if (playlistEntries.length > 0) {
+          const playlistPath = `@tmp/jellyfin-playlist-${safeTemporaryNameComponent(launch.nonce)}-${generation}-${refreshSequence}.m3u8`;
+          try {
+            this.api.file.write(playlistPath, serializeNativePlaylist(playlistEntries));
+            const resolved = this.api.utils.resolvePath(playlistPath);
+            if (typeof resolved !== "string" || !resolved.startsWith("/")) {
+              throw new Error("IINA could not resolve the plugin-private playlist path.");
+            }
+            const loadIndex = currentIndex >= 0 ? currentIndex : existing.length;
+            this.api.mpv.command("loadlist", [resolved, "insert-at", String(loadIndex)]);
+            retainReservations = true;
+            for (const entry of playlistEntries) this.ownedPlaylistLinks.add(entry.location);
+            if (currentIndex >= 0 && selected.after.length > 0) {
+              this.api.mpv.command("playlist-move", [
+                String(currentIndex + playlistEntries.length),
+                String(currentIndex + selected.before.length)
+              ]);
+            }
+            this.api.mpv.set("file-local-options/keep-open", "always");
+          } finally {
+            try {
+              if (this.api.file.exists(playlistPath)) this.api.file.delete(playlistPath);
+            } catch (error) {
+              this.logger.warn("Could not remove the temporary Jellyfin playlist", error);
+            }
+          }
+        }
+        this.logger.info("player.playlist.refreshed", {
+          earlier: selected.before.length,
+          later: selected.after.length
+        });
+      } catch (error) {
+        if (refreshSequence === this.playlistRefreshSequence && this.launch === launch && this.session.generation === generation) {
+          this.logger.warn("Could not populate IINA playlist from Jellyfin", error);
+        }
+      } finally {
+        if (!retainReservations) {
+          for (const location of refreshReservations) this.queuedMediaReferences.delete(location);
+        }
+      }
+    }
+    clearOwnedPlaylistEntries() {
+      if (this.ownedPlaylistLinks.size === 0) {
+        this.queuedMediaReferences.clear();
+        return;
+      }
+      try {
+        const entries = this.api.playlist.list();
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+          const item = entries[index];
+          if (item !== void 0 && !item.isPlaying && this.ownedPlaylistLinks.has(item.filename)) {
+            this.api.playlist.remove(index);
+          }
+        }
+      } catch (error) {
+        this.logger.warn("Could not remove the managed Jellyfin playlist entries", error);
+      } finally {
+        this.queuedMediaReferences.clear();
+        this.ownedPlaylistLinks.clear();
+      }
+    }
+    discardOwnedPlaylistState() {
+      this.queuedMediaReferences.clear();
+      this.ownedPlaylistLinks.clear();
     }
     loadExternalSubtitleTrack() {
       const path = this.externalSubtitlePath;
@@ -7067,6 +8387,27 @@
       if (this.replacementEndFilesToIgnore > 0) {
         this.replacementEndFilesToIgnore -= 1;
         return;
+      }
+      void this.ended();
+    }
+    eofReachedChanged() {
+      if (!this.api.mpv.getFlag("eof-reached")) {
+        if (this.heldCompletedPositionSeconds !== void 0) {
+          this.api.mpv.set("pause", true);
+          this.api.mpv.set("time-pos", this.heldCompletedPositionSeconds);
+          this.api.core.osd("Choose an episode from the playlist to continue.");
+        }
+        return;
+      }
+      if (this.launch === void 0 || this.session.generation === this.eofCompletedGeneration)
+        return;
+      if (this.session.status !== "preparing" && this.session.status !== "playing" && this.session.status !== "paused") {
+        return;
+      }
+      this.eofCompletedGeneration = this.session.generation;
+      const duration = this.api.mpv.getNumber("duration");
+      if (Number.isFinite(duration) && duration >= 0) {
+        this.heldCompletedPositionSeconds = duration;
       }
       void this.ended();
     }
@@ -7242,6 +8583,11 @@
     }
     async stop(reason, closing) {
       this.discardPendingHandoffs();
+      if (closing) {
+        this.discardOwnedPlaylistState();
+      } else {
+        this.clearOwnedPlaylistEntries();
+      }
       if (this.launch === void 0) {
         this.clearMediaCredentials();
         this.deleteExternalSubtitle();
@@ -7277,8 +8623,9 @@
       if (report !== void 0) await report;
       if (endAcknowledgement !== void 0) await endAcknowledgement;
     }
-    releaseForExternalLoad() {
+    releaseForExternalLoad(notifyGlobal = true) {
       const launch = this.launch;
+      const playbackId = this.globalPlaybackId;
       const generation = this.session.generation;
       let report;
       try {
@@ -7298,7 +8645,10 @@
         }
       } finally {
         this.clearUpNext(true);
-        if (launch !== void 0) this.cleanupPlaybackIfOwned(launch, generation);
+        if (notifyGlobal && playbackId !== void 0) this.notifyPlaybackReleased(playbackId);
+        if (launch !== void 0) {
+          this.cleanupPlaybackIfOwned(launch, generation);
+        }
       }
       if (report !== void 0) {
         void report.catch((error) => {
@@ -7306,6 +8656,10 @@
         });
       }
       return Promise.resolve();
+    }
+    notifyPlaybackReleased(playbackId) {
+      this.api.global.postMessage(PLAYER_MESSAGES.closed, { playbackId });
+      if (this.globalPlaybackId === playbackId) this.globalPlaybackId = void 0;
     }
     clearMediaCredentials() {
       this.api.mpv.set("http-header-fields", []);
@@ -7363,7 +8717,25 @@
       this.loadSequence += 1;
     }
     discardPendingHandoffs() {
+      for (const pending of this.pendingLaunchesForHook) this.markStaleMediaLink(pending.mediaLink);
       this.pendingLaunchesForHook.length = 0;
+    }
+    markStaleMediaLink(value) {
+      const identity = mediaLinkIdentity(this.parseMediaReference(value));
+      if (identity === void 0) return;
+      this.staleOwnedMediaLinks.delete(identity);
+      this.staleOwnedMediaLinks.set(identity, Date.now() + STALE_MEDIA_LINK_TTL_MS);
+      while (this.staleOwnedMediaLinks.size > MAX_STALE_MEDIA_LINKS) {
+        const oldest = this.staleOwnedMediaLinks.keys().next().value;
+        if (oldest === void 0) break;
+        this.staleOwnedMediaLinks.delete(oldest);
+      }
+    }
+    consumeStaleMediaLink(identity) {
+      const expiresAt = this.staleOwnedMediaLinks.get(identity);
+      if (expiresAt === void 0) return false;
+      this.staleOwnedMediaLinks.delete(identity);
+      return expiresAt >= Date.now();
     }
     ensureProgressTimer() {
       if (this.progressTimer !== void 0) return;
@@ -7412,18 +8784,25 @@
       this.resetChapterTracking();
       this.pendingFinalChapterSkip = void 0;
       this.clearUpNext(true);
+      this.playlistRefreshSequence += 1;
+      this.clearOwnedPlaylistEntries();
       const coreWasIdle = this.api.core.status.idle;
       const hadActiveMedia = this.retireForReplacement();
       if (sequence !== this.replacementSequence) return;
       const replaceInsideMpv = hadActiveMedia || !coreWasIdle;
       if (replaceInsideMpv) this.replacementEndFilesToIgnore += 1;
-      const pending = { launch, replacementSequence: sequence };
+      const mediaLink = this.ensureMediaReference({
+        serverId: launch.serverId,
+        itemId: launch.plan.itemId,
+        title: mediaTitle(launch.display)
+      });
+      const pending = { launch, replacementSequence: sequence, mediaLink };
       this.pendingLaunchesForHook.push(pending);
       try {
         if (replaceInsideMpv) {
-          this.api.mpv.command("loadfile", ["null://", "replace"]);
+          this.api.mpv.command("loadfile", [mediaLink, "replace"]);
         } else {
-          this.api.core.open("null://");
+          this.api.core.open(mediaLink);
         }
       } catch (error) {
         const pendingIndex = this.pendingLaunchesForHook.indexOf(pending);

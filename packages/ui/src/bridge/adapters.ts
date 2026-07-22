@@ -64,6 +64,7 @@ export function mediaCardFromItem(value: unknown): MediaCard | undefined {
   const seasonNumber = numberValue(item.ParentIndexNumber);
   const episodeNumber = numberValue(item.IndexNumber);
   const seriesName = stringValue(item.SeriesName);
+  const seriesId = stringValue(item.SeriesId);
   const episodeLabel =
     seasonNumber !== undefined && episodeNumber !== undefined
       ? `S${seasonNumber} · E${episodeNumber}`
@@ -84,6 +85,10 @@ export function mediaCardFromItem(value: unknown): MediaCard | undefined {
     progress: progressFromItem(item),
     unwatchedCount:
       numberValue(item.UnwatchedCount) ?? numberValue(record(item.UserData)?.UnplayedItemCount),
+    seriesId,
+    seriesTitle: seriesName,
+    episodeLabel,
+    episodeTitle: kind === 'episode' ? title : undefined,
     kind,
     artwork: stringValue(item.DemoArtwork),
     imageTag: primaryTag ?? thumbTag,
@@ -95,18 +100,24 @@ export function mediaCardsFromResult(value: unknown): {
   items: MediaCard[];
   total: number;
   startIndex: number;
+  nextStartIndex: number;
 } {
   if (Array.isArray(value)) {
     const items = value
       .map(mediaCardFromItem)
       .filter((item): item is MediaCard => item !== undefined);
-    return { items, total: items.length, startIndex: 0 };
+    return { items, total: value.length, startIndex: 0, nextStartIndex: value.length };
   }
   if (!isItemsResult(value)) throw new Error('Jellyfin returned an invalid item list.');
   const items = value.Items.map(mediaCardFromItem).filter(
     (item): item is MediaCard => item !== undefined,
   );
-  return { items, total: value.TotalRecordCount, startIndex: value.StartIndex };
+  return {
+    items,
+    total: value.TotalRecordCount,
+    startIndex: value.StartIndex,
+    nextStartIndex: value.StartIndex + value.Items.length,
+  };
 }
 
 export function supportedLibrariesFromResult(value: unknown): SupportedLibrary[] {

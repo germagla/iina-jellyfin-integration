@@ -40,7 +40,7 @@ export const CatalogRequestSchema = z.discriminatedUnion('kind', [
     .object({
       kind: z.literal('home'),
       shelf: z.enum(['continueWatching', 'nextUp', 'recentlyAdded']),
-      limit: z.number().int().min(1).max(50).default(20),
+      limit: z.number().int().min(1).max(200).default(20),
       seriesId: identifier.optional(),
     })
     .strict(),

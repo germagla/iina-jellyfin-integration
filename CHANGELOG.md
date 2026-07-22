@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-07-22
+
+This release makes Jellyfin playback feel at home in IINA by integrating with its native History
+and playlist while making large catalog screens steadier and easier to browse.
+
+### Native IINA integration
+
+- Adds credential-free, human-readable Jellyfin entries to IINA History and Open Recent. Entries
+  can reopen using the saved Jellyfin connection without placing access tokens or authenticated
+  media URLs in IINA's native stores.
+- Populates IINA's playlist with up to 100 earlier and 100 later playable episodes from the current
+  season, placing the current episode in sequence and giving every row a readable show, season,
+  episode, and title label.
+- Holds playback at the end of a queued episode until another playlist item is selected, then
+  creates a fresh Jellyfin playback session lazily instead of exposing a reusable stream URL.
+
+### Catalog improvements
+
+- Removes timer-driven catalog polling and layout-shifting background indicators so open screens
+  no longer flash during periodic refreshes.
+- Replaces library pagination with one responsive, continuously loading grid that resets cleanly
+  when the library or sort order changes.
+- Groups recently added episodes by series with explicit episode counts and latest-episode context
+  instead of showing duplicate series cards.
+- Scans a bounded larger Recently Added window so bulk season imports do not crowd other new titles
+  out of the shelf.
+
+### Reliability and presentation
+
+- Fixes a fatal mpv command error when quitting IINA with a managed Jellyfin playlist, including
+  the race where an in-flight episode request completed during shutdown.
+- Adds a screenshot gallery to the README and documents the native History and playlist behavior.
+- Documents the credential-free marker retention used to reopen native History and Open Recent
+  entries.
+
 ## 0.1.1 — 2026-07-20
 
 This is the first packaged GitHub release of Jellyfin for IINA: an IINA-native Direct Mode client

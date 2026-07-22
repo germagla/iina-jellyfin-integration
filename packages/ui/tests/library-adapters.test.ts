@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { episodesFromResult, supportedLibrariesFromResult } from '../src/bridge/adapters';
+import {
+  episodesFromResult,
+  mediaCardFromItem,
+  supportedLibrariesFromResult,
+} from '../src/bridge/adapters';
 
 describe('Jellyfin library adapters', () => {
   it('keeps supported Jellyfin views in server order and deduplicates their ids', () => {
@@ -30,6 +34,28 @@ describe('Jellyfin library adapters', () => {
     expect(() => supportedLibrariesFromResult({ Items: [] })).toThrow(
       'Jellyfin returned an invalid library list.',
     );
+  });
+
+  it('retains series and episode identity for recently added grouping', () => {
+    expect(
+      mediaCardFromItem({
+        Id: 'episode-2',
+        Name: 'Lodging',
+        Type: 'Episode',
+        SeriesId: 'widows-bay',
+        SeriesName: "Widow's Bay",
+        ParentIndexNumber: 1,
+        IndexNumber: 2,
+      }),
+    ).toMatchObject({
+      id: 'episode-2',
+      title: 'Lodging',
+      kind: 'episode',
+      seriesId: 'widows-bay',
+      seriesTitle: "Widow's Bay",
+      episodeLabel: 'S1 · E2',
+      episodeTitle: 'Lodging',
+    });
   });
 
   it('excludes virtual, offline, and placeholder episodes', () => {

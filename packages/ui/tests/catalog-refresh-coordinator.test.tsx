@@ -176,21 +176,16 @@ describe('useCatalogRefreshCoordinator', () => {
     expect(onRefresh).toHaveBeenCalledTimes(2);
   });
 
-  it('refreshes every 60 seconds while visible', async () => {
+  it('does not refresh solely because time passes', async () => {
     const bridge = createBridge();
     const onRefresh = vi.fn();
     render(<RefreshHarness bridge={bridge.bridge} onRefresh={onRefresh} />);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_249);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
     });
     expect(bridge.request).not.toHaveBeenCalled();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
-    });
-    expect(bridge.request).toHaveBeenCalledTimes(1);
-    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(onRefresh).not.toHaveBeenCalled();
   });
 
   it('uses the latest callback without restarting the coordinator', async () => {

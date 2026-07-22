@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { CatalogBridge } from '../bridge/contracts';
 
-const REFRESH_INTERVAL_MS = 60_000;
 const REFRESH_COALESCE_MS = 250;
 
 export interface CatalogRefreshCoordinatorOptions {
@@ -86,7 +85,6 @@ export function useCatalogRefreshCoordinator({
       schedule();
     };
 
-    const interval = window.setInterval(schedule, REFRESH_INTERVAL_MS);
     const unsubscribeInvalidation = bridge.subscribeInvalidation?.(schedule);
     window.addEventListener('focus', schedule);
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -94,7 +92,6 @@ export function useCatalogRefreshCoordinator({
     return () => {
       disposed = true;
       clearCoalesceTimer();
-      window.clearInterval(interval);
       window.removeEventListener('focus', schedule);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       unsubscribeInvalidation?.();

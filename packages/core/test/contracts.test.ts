@@ -27,6 +27,15 @@ describe('bridge contracts', () => {
     expect(() => CatalogRequestSchema.parse({ kind: 'library', itemType: 'Movie' })).toThrow();
   });
 
+  it('bounds the larger Recently Added scan', () => {
+    expect(() =>
+      CatalogRequestSchema.parse({ kind: 'home', shelf: 'recentlyAdded', limit: 200 }),
+    ).not.toThrow();
+    expect(() =>
+      CatalogRequestSchema.parse({ kind: 'home', shelf: 'recentlyAdded', limit: 201 }),
+    ).toThrow();
+  });
+
   it('rejects unknown operations and unknown payload properties', () => {
     expect(() =>
       BridgeRequestSchema.parse({ operation: 'iina.evaluate', requestId: 'bad', payload: {} }),

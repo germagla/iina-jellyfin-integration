@@ -69,7 +69,8 @@ const artworkCache = new ArtworkCache(
 let quickConnectAttempt: QuickConnectAttempt | undefined;
 let quickConnectGeneration = 0;
 let connectionGeneration = 0;
-let managedPlayerId: number | undefined;
+let managedPlayerTarget: number | string | undefined;
+let managedPlaybackId: string | undefined;
 let managedPlaybackSequence = 0;
 interface PendingLaunch {
   launch: PlayerLaunch;
@@ -92,7 +93,7 @@ const playbackConfirmations = new PlaybackConfirmationStore<PreparedLaunch>(
   16,
   setTimeout,
 );
-const createdPlayerIds = new Set<number>();
+const activePlaybackTargets = new Map<string, number | string>();
 const catalogDiagnosticFingerprints = new Set<string>();
 let catalogReady = false;
 let catalogOpenRequested = false;
@@ -168,7 +169,11 @@ function prunePendingLaunches(): void {
   }
 }
 
-function postPlayerMessage(playerId: number, name: string, payload: unknown): Promise<void> {
+function postPlayerMessage(
+  playerId: number | string,
+  name: string,
+  payload: unknown,
+): Promise<void> {
   return runOnIinaMainThread(() => {
     api.global.postMessage(playerId, name, payload);
   });
@@ -183,12 +188,30 @@ function registerPendingLaunch(nonce: string, pending: PendingLaunch): void {
 
 function stopTrackedPlayers(reason: 'closed' | 'replaced' | 'user'): void {
   managedPlaybackSequence += 1;
-  for (const playerId of createdPlayerIds) {
-    void postPlayerMessage(playerId, PLAYER_MESSAGES.stop, { reason }).catch((error) => {
-      logger.warn('Could not stop a controlled Jellyfin player', error);
+  const targets = new Set(activePlaybackTargets.values());
+  for (const pending of pendingLaunches.values()) {
+    if (pending.playerId !== undefined) targets.add(pending.playerId);
+  }
+  for (const target of targets) {
+    void postPlayerMessage(target, PLAYER_MESSAGES.stop, { reason }).catch((error) => {
+      logger.warn('Could not stop an active Jellyfin player', error);
     });
   }
+  activePlaybackTargets.clear();
+  managedPlayerTarget = undefined;
+  managedPlaybackId = undefined;
   playbackConfirmations.clear();
+}
+
+function trackManagedPlayback(playbackId: string, target: number | string): void {
+  if (managedPlaybackId !== undefined) activePlaybackTargets.delete(managedPlaybackId);
+  managedPlaybackId = playbackId;
+  managedPlayerTarget = target;
+  activePlaybackTargets.set(playbackId, target);
+}
+
+function trackDetachedPlayback(playbackId: string, target: number | string): void {
+  activePlaybackTargets.set(playbackId, target);
 }
 
 function deletePlaybackStateFile(playbackId: string): void {
@@ -257,10 +280,10 @@ function beginAuthenticationAttempt(): number {
   connectionGeneration += 1;
   quickConnectAttempt = undefined;
   quickConnectGeneration = connectionGeneration;
-  pendingLaunches.clear();
   playbackConfirmations.clear();
   resetPlaybackStateBoundary();
   stopTrackedPlayers('closed');
+  pendingLaunches.clear();
   return connectionGeneration;
 }
 
@@ -477,6 +500,8 @@ async function prepareLaunch(request: PlaybackRequest): Promise<{
   publicPlan: ReturnType<typeof publicPlaybackResult>;
 }> {
   const generation = connectionGeneration;
+  const metadata = connectionStore.readMetadata();
+  if (metadata === undefined) throw new Error('Connect to Jellyfin before starting playback.');
   const context = authenticatedContext();
   const details = BaseItemSchema.parse(
     await client.queryCatalog({ kind: 'details', itemId: request.itemId }, context),
@@ -488,6 +513,12 @@ async function prepareLaunch(request: PlaybackRequest): Promise<{
   const nonce = createOpaqueId('play');
   const launch: PlayerLaunch = {
     nonce,
+    serverId: metadata.serverId,
+    connection: {
+      serverId: metadata.serverId,
+      userId: metadata.userId,
+      lastConnectedAt: metadata.lastConnectedAt,
+    },
     plan,
     context,
     display: displayMetadataFromItem(details),
@@ -504,17 +535,18 @@ async function deliverPreparedLaunch(
   const correlation = launch.diagnosticCorrelation ?? createOpaqueId('diagnostic-playback');
   assertManagedPlaybackSequence(managedSequence);
 
-  if (!request.openInNewWindow && managedPlayerId !== undefined) {
+  if (!request.openInNewWindow && managedPlayerTarget !== undefined) {
     assertManagedPlaybackSequence(managedSequence);
     logger.info('native-player.reuse', { correlation });
     // The controlled main entry is already loaded. Deliver the complete trusted
     // launch directly by numeric handle; PlayerRuntime replaces active media via
     // mpv so IINA does not close and recreate the visible player window.
-    const playerId = managedPlayerId;
+    const playerId = managedPlayerTarget;
     await runOnIinaMainThread(() => {
       assertManagedPlaybackSequence(managedSequence);
       api.global.postMessage(playerId, PLAYER_MESSAGES.launch, launch);
     });
+    trackManagedPlayback(launch.nonce, playerId);
     rememberLaunchedPlayback(launch.nonce);
     return { status: 'started', playbackId: launch.nonce, plan: publicPlan };
   }
@@ -551,7 +583,6 @@ async function deliverPreparedLaunch(
   logger.info('native-player.create.returned', { correlation });
   pending.playerId = playerId;
   pending.createdPlayer = true;
-  createdPlayerIds.add(playerId);
   try {
     // A newer bridge request can start after the main-run-loop callback creates
     // the core but before this async continuation resumes. Retain the numeric
@@ -570,7 +601,8 @@ async function deliverPreparedLaunch(
       // Claim the reusable handle only in the same main-run-loop callback that
       // successfully delivered the still-current launch. A superseded create
       // remains tracked for cleanup/reuse but can never steal managed ownership.
-      if (!request.openInNewWindow) managedPlayerId = playerId;
+      if (!request.openInNewWindow) trackManagedPlayback(launch.nonce, playerId);
+      else trackDetachedPlayback(launch.nonce, playerId);
     });
     rememberLaunchedPlayback(launch.nonce);
     pendingLaunches.delete(nonce);
@@ -720,10 +752,10 @@ async function handleBridgeRequest(raw: unknown): Promise<void> {
         connectionStore.clear();
         quickConnectAttempt = undefined;
         quickConnectGeneration = connectionGeneration;
-        pendingLaunches.clear();
         playbackConfirmations.clear();
         resetPlaybackStateBoundary();
         stopTrackedPlayers('closed');
+        pendingLaunches.clear();
         if (context !== undefined) {
           // Player cores keep their own in-memory context long enough to send
           // their final stopped reports. IINA has no child-to-Global
@@ -759,8 +791,8 @@ async function handleBridgeRequest(raw: unknown): Promise<void> {
         managedPlaybackSequence += 1;
         playbackConfirmations.clear();
         prunePendingLaunches();
-        if (managedPlayerId !== undefined) {
-          await postPlayerMessage(managedPlayerId, PLAYER_MESSAGES.stop, {
+        if (managedPlayerTarget !== undefined) {
+          await postPlayerMessage(managedPlayerTarget, PLAYER_MESSAGES.stop, {
             reason: request.payload.reason,
           });
         }
@@ -805,6 +837,117 @@ function markCatalogReady(replay: boolean): void {
   }
   if (firstReady || replay) postCatalogVisible();
 }
+
+api.global.onMessage(PLAYER_MESSAGES.linkedLaunch, (raw, playerLabel) => {
+  if (
+    raw === null ||
+    typeof raw !== 'object' ||
+    typeof (raw as { playbackId?: unknown }).playbackId !== 'string' ||
+    (raw as { playbackId: string }).playbackId.length === 0 ||
+    (raw as { playbackId: string }).playbackId.length > 256 ||
+    typeof playerLabel !== 'string' ||
+    playerLabel.length === 0 ||
+    playerLabel.length > 512
+  ) {
+    return;
+  }
+  const candidate = raw as {
+    playbackId: string;
+    previousPlaybackId?: unknown;
+    connection?: unknown;
+  };
+  const linkedConnection = candidate.connection as
+    { serverId?: unknown; userId?: unknown; lastConnectedAt?: unknown } | undefined;
+  if (
+    linkedConnection === undefined ||
+    typeof linkedConnection.serverId !== 'string' ||
+    typeof linkedConnection.userId !== 'string' ||
+    typeof linkedConnection.lastConnectedAt !== 'string' ||
+    (candidate.previousPlaybackId !== undefined &&
+      (typeof candidate.previousPlaybackId !== 'string' ||
+        candidate.previousPlaybackId.length === 0 ||
+        candidate.previousPlaybackId.length > 256))
+  ) {
+    return;
+  }
+  const currentConnection = connectionStore.readMetadata();
+  if (
+    currentConnection === undefined ||
+    currentConnection.serverId !== linkedConnection.serverId ||
+    currentConnection.userId !== linkedConnection.userId ||
+    currentConnection.lastConnectedAt !== linkedConnection.lastConnectedAt
+  ) {
+    void postPlayerMessage(playerLabel, PLAYER_MESSAGES.stop, { reason: 'closed' }).catch((error) =>
+      logger.warn('Could not stop a stale linked Jellyfin player', error),
+    );
+    return;
+  }
+  const playbackId = candidate.playbackId;
+  const previousPlaybackId = candidate.previousPlaybackId as string | undefined;
+  const continuationTarget =
+    previousPlaybackId === undefined ? undefined : activePlaybackTargets.get(previousPlaybackId);
+
+  if (continuationTarget !== undefined && previousPlaybackId !== undefined) {
+    activePlaybackTargets.delete(previousPlaybackId);
+    activePlaybackTargets.set(playbackId, continuationTarget);
+    if (managedPlaybackId === previousPlaybackId) {
+      managedPlaybackSequence += 1;
+      playbackConfirmations.clear();
+      managedPlaybackId = playbackId;
+      managedPlayerTarget = continuationTarget;
+    }
+    rememberLaunchedPlayback(playbackId);
+    logger.info('native-player.linked-playlist-continued');
+    return;
+  }
+
+  // A continuation whose prior playback is no longer active stays detached.
+  // It must not steal or stop the user's current managed player.
+  if (previousPlaybackId !== undefined) {
+    trackDetachedPlayback(playbackId, playerLabel);
+    rememberLaunchedPlayback(playbackId);
+    logger.info('native-player.linked-playlist-detached');
+    return;
+  }
+
+  const previousTarget = managedPlayerTarget;
+  managedPlaybackSequence += 1;
+  playbackConfirmations.clear();
+  if (managedPlaybackId !== undefined) activePlaybackTargets.delete(managedPlaybackId);
+  trackManagedPlayback(playbackId, playerLabel);
+  rememberLaunchedPlayback(playbackId);
+  if (previousTarget !== undefined && previousTarget !== playerLabel) {
+    void postPlayerMessage(previousTarget, PLAYER_MESSAGES.stop, { reason: 'replaced' }).catch(
+      (error) => logger.warn('Could not replace the previous managed Jellyfin player', error),
+    );
+  }
+  logger.info('native-player.linked-history-registered');
+});
+
+api.global.onMessage(PLAYER_MESSAGES.closed, (raw, playerLabel) => {
+  if (
+    raw === null ||
+    typeof raw !== 'object' ||
+    typeof (raw as { playbackId?: unknown }).playbackId !== 'string' ||
+    (raw as { playbackId: string }).playbackId.length === 0 ||
+    (raw as { playbackId: string }).playbackId.length > 256 ||
+    typeof playerLabel !== 'string' ||
+    playerLabel.length === 0 ||
+    playerLabel.length > 512
+  ) {
+    return;
+  }
+  const playbackId = (raw as { playbackId: string }).playbackId;
+  const target = activePlaybackTargets.get(playbackId);
+  if (target === undefined || (typeof target === 'string' && target !== playerLabel)) return;
+
+  activePlaybackTargets.delete(playbackId);
+  if (managedPlaybackId === playbackId) {
+    managedPlaybackId = undefined;
+    managedPlayerTarget = undefined;
+  }
+  logger.info('native-player.linked-released');
+});
 
 api.standaloneWindow.loadFile('dist/ui/catalog/index.html');
 api.standaloneWindow.setProperty({

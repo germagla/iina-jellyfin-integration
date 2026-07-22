@@ -1,10 +1,10 @@
 {
   "name": "Jellyfin for IINA",
   "identifier": "dev.germagla.iina-jellyfin",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Browse and play movies and television from Jellyfin in an IINA-native Direct Mode experience.",
   "ghRepo": "germagla/iina-jellyfin-integration",
-  "ghVersion": 1,
+  "ghVersion": 2,
   "author": {
     "name": "Germagla"
   },
@@ -21,7 +21,6 @@
     "deviceId": "",
     "catalogOpenRequestAtMs": 0,
     "diagnosticLogRevealRequestAtMs": 0,
-    "foregroundPollSeconds": 60,
     "artworkCacheMaxBytes": 52428800,
     "chapterSkipMode": "prompt",
     "skipChapterTitles": "Opening,Intro,Introduction,Opening Credits,Opening Theme,Main Title,Title Sequence,Theme,Theme Song,OP,Ending,Outro,Credits,End Credits,Closing Credits,Final Credits,Credit Roll,Closing Theme,ED"

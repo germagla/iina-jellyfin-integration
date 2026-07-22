@@ -27,6 +27,11 @@ export interface MediaCard {
   playbackPositionTicks?: number;
   progress?: number;
   unwatchedCount?: number;
+  seriesId?: string;
+  seriesTitle?: string;
+  episodeLabel?: string;
+  episodeTitle?: string;
+  recentlyAddedEpisodeCount?: number;
   kind: MediaKind;
   artwork?: string;
   imageTag?: string;

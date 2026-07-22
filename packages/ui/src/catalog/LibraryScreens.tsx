@@ -1,16 +1,11 @@
-import { CaretLeft, CaretRight, MagnifyingGlass, SpinnerGap } from '@phosphor-icons/react';
-import { type CSSProperties, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { MagnifyingGlass, SpinnerGap } from '@phosphor-icons/react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { CatalogBridge, HomeCatalog, MediaCard, SupportedLibrary } from '../bridge/contracts';
 import { mediaCardsFromResult } from '../bridge/adapters';
 import { ProgressBar } from '../components/ProgressBar';
 import { BrokeredArtwork } from './Artwork';
-import {
-  anchorStartIndex,
-  calculateLibraryLayout,
-  calculateShelfCapacity,
-  clampStartIndex,
-  type LibraryLayout,
-} from './catalog-layout';
+import { calculateShelfCapacity } from './catalog-layout';
+import { groupRecentlyAdded } from './recently-added';
 import { CatalogSkeleton, type DemoSurfaceState, EmptyState, ErrorState } from './SurfaceState';
 
 interface ScreenProps {
@@ -31,12 +26,14 @@ export function MediaCardButton({
   onSelect: (item: MediaCard) => void;
   wide?: boolean;
 }) {
+  const accessibleDetail = item.recentlyAddedEpisodeCount ? item.subtitle : undefined;
+
   return (
     <button
       type="button"
       className={`media-card${wide ? ' media-card--wide' : ''}`}
       onClick={() => onSelect(item)}
-      aria-label={`Open ${item.title}`}
+      aria-label={`Open ${item.title}${accessibleDetail ? `, ${accessibleDetail}` : ''}`}
       data-media-item-id={item.id}
     >
       <span className="media-card__artwork">
@@ -51,7 +48,11 @@ export function MediaCardButton({
           alt=""
           className="media-card__image"
         />
-        {item.unwatchedCount ? (
+        {item.recentlyAddedEpisodeCount ? (
+          <span className="media-card__badge media-card__badge--label">
+            {item.recentlyAddedEpisodeCount === 1 ? 'NEW' : `${item.recentlyAddedEpisodeCount} NEW`}
+          </span>
+        ) : item.unwatchedCount ? (
           <span className="media-card__badge">{item.unwatchedCount}</span>
         ) : null}
         {typeof item.progress === 'number' ? (
@@ -75,36 +76,15 @@ export function MediaCardButton({
   );
 }
 
-function RefreshStatus({
-  refreshing,
-  error,
-  onRetry,
-}: {
-  refreshing: boolean;
-  error?: string;
-  onRetry: () => void;
-}) {
-  if (!refreshing && error === undefined) return null;
+function RefreshStatus({ error, onRetry }: { error?: string; onRetry: () => void }) {
+  if (error === undefined) return null;
 
   return (
-    <div
-      className={`catalog-refresh-status${error ? ' catalog-refresh-status--error' : ''}`}
-      role="status"
-      aria-atomic="true"
-    >
-      {refreshing ? (
-        <>
-          <SpinnerGap className="spin" size={14} aria-hidden="true" />
-          <span>Updating…</span>
-        </>
-      ) : (
-        <>
-          <span>Couldn’t refresh: {error}</span>
-          <button type="button" onClick={onRetry}>
-            Try Again
-          </button>
-        </>
-      )}
+    <div className="catalog-refresh-status catalog-refresh-status--error" role="status">
+      <span>Couldn’t refresh: {error}</span>
+      <button type="button" onClick={onRetry}>
+        Try Again
+      </button>
     </div>
   );
 }
@@ -279,7 +259,9 @@ export function HomeScreen({
     void Promise.all([
       bridge.request('catalog.query', { kind: 'home', shelf: 'continueWatching', limit: 20 }),
       bridge.request('catalog.query', { kind: 'home', shelf: 'nextUp', limit: 20 }),
-      bridge.request('catalog.query', { kind: 'home', shelf: 'recentlyAdded', limit: 20 }),
+      // Scan beyond the 20 visible groups so a large season import cannot
+      // crowd every other recent movie or series out of the shelf.
+      bridge.request('catalog.query', { kind: 'home', shelf: 'recentlyAdded', limit: 200 }),
     ])
       .then(([continueWatching, nextUp, recentlyAdded]) => {
         if (!active || sequence !== requestSequence.current) return;
@@ -287,7 +269,7 @@ export function HomeScreen({
         const nextHome = {
           continueWatching: mediaCardsFromResult(continueWatching).items,
           nextUp: mediaCardsFromResult(nextUp).items,
-          recentlyAdded: mediaCardsFromResult(recentlyAdded).items,
+          recentlyAdded: groupRecentlyAdded(mediaCardsFromResult(recentlyAdded).items).slice(0, 20),
         };
         const focusedShelf =
           document.activeElement instanceof HTMLElement
@@ -335,17 +317,13 @@ export function HomeScreen({
     [home.continueWatching, home.nextUp, home.recentlyAdded].every((items) => items.length === 0);
 
   return (
-    <div className="home-screen">
+    <div className="home-screen" aria-busy={initialLoading || refreshing}>
       <div className="page-introduction">
         <p>Living Room Server</p>
         <h1 ref={homeHeadingRef} tabIndex={-1}>
           Library
         </h1>
-        <RefreshStatus
-          refreshing={refreshing}
-          error={refreshError}
-          onRetry={() => setRetry((value) => value + 1)}
-        />
+        <RefreshStatus error={refreshError} onRetry={() => setRetry((value) => value + 1)} />
       </div>
       {isEmpty ? (
         <EmptyState
@@ -390,6 +368,16 @@ interface GridScreenProps extends ScreenProps {
   library: SupportedLibrary;
 }
 
+const LIBRARY_BATCH_SIZE = 60;
+
+interface LibrarySnapshot {
+  items: MediaCard[];
+  total: number;
+  nextStartIndex: number;
+  scopeKey: string;
+  queryKey: string;
+}
+
 export function GridScreen({
   bridge,
   demoState = 'default',
@@ -398,84 +386,38 @@ export function GridScreen({
   library,
 }: GridScreenProps) {
   const [sort, setSort] = useState<'recent' | 'title' | 'year'>('recent');
-  const [startIndex, setStartIndex] = useState(0);
-  const startIndexRef = useRef(0);
-  const fallbackLayout = calculateLibraryLayout({
-    containerWidth: 0,
-    viewportWidth: 0,
-    viewportHeight: 0,
-    gridTop: 0,
-  });
-  const [layout, setLayout] = useState<LibraryLayout>(fallbackLayout);
-  const layoutRef = useRef(layout);
-  const gridRegionRef = useRef<HTMLDivElement>(null);
-  const [snapshot, setSnapshot] = useState<{
-    items: MediaCard[];
-    total: number;
-    startIndex: number;
-    pageSize: number;
-  }>();
-  const snapshotRef = useRef<typeof snapshot>();
+  const [snapshot, setSnapshot] = useState<LibrarySnapshot>();
+  const snapshotRef = useRef<LibrarySnapshot>();
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const refreshingRef = useRef(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadingMoreRef = useRef(false);
   const [initialError, setInitialError] = useState<string>();
   const [refreshError, setRefreshError] = useState<string>();
+  const [loadMoreError, setLoadMoreError] = useState<string>();
   const [retry, setRetry] = useState(0);
   const requestSequence = useRef(0);
+  const loadMoreButtonRef = useRef<HTMLButtonElement>(null);
   const title = library.name;
+  const scopeKey = `${library.id}:${library.kind}`;
+  const queryKey = `${scopeKey}:${sort}`;
 
-  const updateStartIndex = (value: number) => {
-    const normalized = Math.max(0, Math.floor(value));
-    startIndexRef.current = normalized;
-    setStartIndex(normalized);
-  };
-
-  useLayoutEffect(() => {
-    const region = gridRegionRef.current;
-    if (region === null) return;
-    let timer: number | undefined;
-
-    const measure = () => {
-      const rect = region.getBoundingClientRect();
-      const containerWidth = rect.width || region.clientWidth;
-      if (containerWidth <= 0 || window.innerWidth <= 0 || window.innerHeight <= 0) return;
-      const nextLayout = calculateLibraryLayout({
-        containerWidth,
-        viewportWidth: window.innerWidth,
-        viewportHeight: window.innerHeight,
-        gridTop: Math.max(0, rect.top),
+  const requestLibraryPage = useCallback(
+    async (startIndex: number, limit: number) => {
+      const result = await bridge.request('catalog.query', {
+        kind: 'library',
+        itemType: library.kind === 'movie' ? 'Movie' : 'Series',
+        parentId: library.id,
+        startIndex,
+        limit,
+        sortBy: sort === 'title' ? 'SortName' : sort === 'year' ? 'PremiereDate' : 'DateCreated',
+        sortOrder: sort === 'title' ? 'Ascending' : 'Descending',
       });
-      const previous = layoutRef.current;
-      if (
-        nextLayout.columns === previous.columns &&
-        nextLayout.pageSize === previous.pageSize &&
-        nextLayout.rows === previous.rows
-      ) {
-        return;
-      }
-
-      layoutRef.current = nextLayout;
-      setLayout(nextLayout);
-      if (nextLayout.pageSize !== previous.pageSize) {
-        updateStartIndex(anchorStartIndex(startIndexRef.current, nextLayout.pageSize));
-      }
-    };
-    const scheduleMeasure = () => {
-      if (timer !== undefined) window.clearTimeout(timer);
-      timer = window.setTimeout(measure, 150);
-    };
-
-    measure();
-    const observer =
-      typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(scheduleMeasure);
-    observer?.observe(region);
-    window.addEventListener('resize', scheduleMeasure);
-    return () => {
-      if (timer !== undefined) window.clearTimeout(timer);
-      observer?.disconnect();
-      window.removeEventListener('resize', scheduleMeasure);
-    };
-  }, []);
+      return mediaCardsFromResult(result);
+    },
+    [bridge, library.id, library.kind, sort],
+  );
 
   useEffect(() => {
     let active = true;
@@ -483,56 +425,71 @@ export function GridScreen({
     if (demoState !== 'default') {
       const demoSnapshot =
         demoState === 'empty'
-          ? { items: [], total: 0, startIndex: 0, pageSize: layout.pageSize }
+          ? { items: [], total: 0, nextStartIndex: 0, scopeKey, queryKey }
           : undefined;
       snapshotRef.current = demoSnapshot;
       setSnapshot(demoSnapshot);
       setInitialLoading(demoState === 'loading');
       setRefreshing(false);
+      refreshingRef.current = false;
+      setLoadingMore(false);
+      loadingMoreRef.current = false;
       setInitialError(
         demoState === 'error' ? 'The Jellyfin server could not be reached.' : undefined,
       );
       setRefreshError(undefined);
+      setLoadMoreError(undefined);
       return () => {
         active = false;
       };
     }
 
-    const background = snapshotRef.current !== undefined;
+    const previousSnapshot = snapshotRef.current;
+    const background = previousSnapshot?.scopeKey === scopeKey;
+    if (!background) {
+      snapshotRef.current = undefined;
+      setSnapshot(undefined);
+    }
     setInitialLoading(!background);
     setRefreshing(background);
+    refreshingRef.current = background;
+    setLoadingMore(false);
+    loadingMoreRef.current = false;
     if (!background) setInitialError(undefined);
     setRefreshError(undefined);
-    const requestedStartIndex = startIndex;
-    const requestedPageSize = layout.pageSize;
-    void bridge
-      .request('catalog.query', {
-        kind: 'library',
-        itemType: library.kind === 'movie' ? 'Movie' : 'Series',
-        parentId: library.id,
-        startIndex: requestedStartIndex,
-        limit: requestedPageSize,
-        sortBy: sort === 'title' ? 'SortName' : sort === 'year' ? 'PremiereDate' : 'DateCreated',
-        sortOrder: sort === 'title' ? 'Ascending' : 'Descending',
-      })
-      .then((result) => {
+    setLoadMoreError(undefined);
+    const targetCount =
+      previousSnapshot?.queryKey === queryKey
+        ? Math.max(LIBRARY_BATCH_SIZE, previousSnapshot.nextStartIndex)
+        : LIBRARY_BATCH_SIZE;
+
+    void (async () => {
+      const items: MediaCard[] = [];
+      const seenIds = new Set<string>();
+      let startIndex = 0;
+      let total = Number.POSITIVE_INFINITY;
+      while (startIndex < targetCount && startIndex < total) {
+        const page = await requestLibraryPage(startIndex, Math.min(200, targetCount - startIndex));
         if (!active || sequence !== requestSequence.current) return;
-        const pageResult = mediaCardsFromResult(result);
-        const clampedStartIndex = clampStartIndex(
-          requestedStartIndex,
-          requestedPageSize,
-          pageResult.total,
-        );
-        if (clampedStartIndex !== requestedStartIndex) {
-          updateStartIndex(clampedStartIndex);
-          return;
+        for (const item of page.items) {
+          if (seenIds.has(item.id)) continue;
+          seenIds.add(item.id);
+          items.push(item);
         }
-        const nextSnapshot = {
-          items: pageResult.items,
-          total: pageResult.total,
-          startIndex: requestedStartIndex,
-          pageSize: requestedPageSize,
-        };
+        total = Math.max(page.total, page.nextStartIndex);
+        if (page.nextStartIndex <= startIndex) break;
+        startIndex = page.nextStartIndex;
+      }
+      return {
+        items,
+        total: Number.isFinite(total) ? total : startIndex,
+        nextStartIndex: startIndex,
+        scopeKey,
+        queryKey,
+      };
+    })()
+      .then((nextSnapshot) => {
+        if (!nextSnapshot || !active || sequence !== requestSequence.current) return;
         snapshotRef.current = nextSnapshot;
         setSnapshot(nextSnapshot);
       })
@@ -546,27 +503,87 @@ export function GridScreen({
         if (!active || sequence !== requestSequence.current) return;
         setInitialLoading(false);
         setRefreshing(false);
+        refreshingRef.current = false;
       });
 
     return () => {
       active = false;
     };
-  }, [
-    bridge,
-    demoState,
-    layout.pageSize,
-    library.id,
-    library.kind,
-    refreshKey,
-    retry,
-    sort,
-    startIndex,
-  ]);
+  }, [demoState, queryKey, refreshKey, requestLibraryPage, retry, scopeKey]);
+
+  const loadMore = useCallback(() => {
+    const current = snapshotRef.current;
+    if (
+      loadingMoreRef.current ||
+      refreshingRef.current ||
+      current === undefined ||
+      current.queryKey !== queryKey ||
+      current.nextStartIndex >= current.total
+    ) {
+      return;
+    }
+
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    setLoadMoreError(undefined);
+    const sequence = requestSequence.current;
+    const startIndex = current.nextStartIndex;
+    void requestLibraryPage(startIndex, Math.min(LIBRARY_BATCH_SIZE, current.total - startIndex))
+      .then((page) => {
+        if (sequence !== requestSequence.current) return;
+        const latest = snapshotRef.current;
+        if (latest === undefined || latest.queryKey !== queryKey) return;
+        if (page.nextStartIndex <= startIndex) {
+          const nextSnapshot = { ...latest, total: startIndex, nextStartIndex: startIndex };
+          snapshotRef.current = nextSnapshot;
+          setSnapshot(nextSnapshot);
+          setRefreshError('Jellyfin returned an incomplete library page.');
+          return;
+        }
+        const seenIds = new Set(latest.items.map((item) => item.id));
+        const appendedItems = page.items.filter((item) => {
+          if (seenIds.has(item.id)) return false;
+          seenIds.add(item.id);
+          return true;
+        });
+        const items = [...latest.items, ...appendedItems];
+        const nextSnapshot = {
+          items,
+          total: Math.max(page.total, page.nextStartIndex),
+          nextStartIndex: page.nextStartIndex,
+          scopeKey,
+          queryKey,
+        };
+        snapshotRef.current = nextSnapshot;
+        setSnapshot(nextSnapshot);
+      })
+      .catch((reason: unknown) => {
+        if (sequence !== requestSequence.current) return;
+        setLoadMoreError(reason instanceof Error ? reason.message : 'More titles could not load.');
+      })
+      .finally(() => {
+        if (sequence !== requestSequence.current) return;
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      });
+  }, [queryKey, requestLibraryPage, scopeKey]);
 
   const totalItems = snapshot?.total ?? 0;
-  const page = snapshot ? Math.floor(snapshot.startIndex / snapshot.pageSize) + 1 : 1;
-  const totalPages = snapshot ? Math.max(1, Math.ceil(snapshot.total / snapshot.pageSize)) : 1;
-  const gridStyle = { '--catalog-columns': layout.columns } as CSSProperties;
+  const hasMore = snapshot !== undefined && snapshot.nextStartIndex < snapshot.total;
+
+  useEffect(() => {
+    const button = loadMoreButtonRef.current;
+    if (refreshing || !hasMore || button === null || typeof IntersectionObserver === 'undefined')
+      return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) loadMore();
+      },
+      { rootMargin: '320px 0px' },
+    );
+    observer.observe(button);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore, refreshing, snapshot?.nextStartIndex]);
 
   return (
     <div className="grid-screen">
@@ -580,8 +597,9 @@ export function GridScreen({
           <select
             value={sort}
             onChange={(event) => {
+              document.documentElement.scrollTop = 0;
+              document.body.scrollTop = 0;
               setSort(event.target.value as typeof sort);
-              updateStartIndex(0);
             }}
           >
             <option value="recent">Recently added</option>
@@ -591,15 +609,8 @@ export function GridScreen({
         </label>
       </div>
 
-      <div
-        ref={gridRegionRef}
-        className="catalog-grid-region"
-        style={gridStyle}
-        aria-busy={initialLoading || refreshing}
-      >
-        {initialLoading && snapshot === undefined ? (
-          <CatalogSkeleton count={layout.pageSize} />
-        ) : null}
+      <div className="catalog-grid-region" aria-busy={initialLoading || refreshing || loadingMore}>
+        {initialLoading && snapshot === undefined ? <CatalogSkeleton count={12} /> : null}
         {initialError && snapshot === undefined ? (
           <ErrorState message={initialError} onRetry={() => setRetry((value) => value + 1)} />
         ) : null}
@@ -613,43 +624,29 @@ export function GridScreen({
             ))}
           </div>
         ) : null}
-        <RefreshStatus
-          refreshing={refreshing}
-          error={refreshError}
-          onRetry={() => setRetry((value) => value + 1)}
-        />
+        <RefreshStatus error={refreshError} onRetry={() => setRetry((value) => value + 1)} />
       </div>
 
-      {snapshot && totalPages > 1 ? (
-        <nav className="pagination" aria-label={`${title} pages`}>
+      {hasMore ? (
+        <div className="library-load-more">
           <button
-            className="icon-button"
+            ref={loadMoreButtonRef}
+            className="secondary-button library-load-more__button"
             type="button"
-            onClick={() => updateStartIndex(Math.max(0, snapshot.startIndex - layout.pageSize))}
-            disabled={page === 1 || refreshing}
-            aria-label="Previous page"
+            onClick={loadMore}
+            disabled={loadingMore || refreshing}
           >
-            <CaretLeft size={18} aria-hidden="true" />
+            {loadingMore ? (
+              <>
+                <SpinnerGap className="spin" size={16} aria-hidden="true" />
+                Loading more…
+              </>
+            ) : (
+              `Load more · ${Math.max(0, totalItems - (snapshot?.nextStartIndex ?? 0))} remaining`
+            )}
           </button>
-          <span aria-live="polite" aria-atomic="true">
-            Showing {snapshot.startIndex + 1}–
-            {Math.min(snapshot.startIndex + snapshot.items.length, snapshot.total)} of{' '}
-            {snapshot.total} · Page {page} of {totalPages}
-          </span>
-          <button
-            className="icon-button"
-            type="button"
-            onClick={() =>
-              updateStartIndex(
-                clampStartIndex(snapshot.startIndex + layout.pageSize, layout.pageSize, totalItems),
-              )
-            }
-            disabled={page === totalPages || refreshing}
-            aria-label="Next page"
-          >
-            <CaretRight size={18} aria-hidden="true" />
-          </button>
-        </nav>
+          <RefreshStatus error={loadMoreError} onRetry={loadMore} />
+        </div>
       ) : null}
     </div>
   );
@@ -723,7 +720,7 @@ export function SearchScreen({
   const backgroundError = showingCommittedResults && error !== undefined;
 
   return (
-    <div className="search-screen">
+    <div className="search-screen" aria-busy={loading}>
       <div className="page-introduction">
         <p>Movies and television</p>
         <h1>Search</h1>
@@ -738,7 +735,9 @@ export function SearchScreen({
           placeholder="Titles, episodes, people…"
           type="search"
         />
-        {loading ? <SpinnerGap className="spin" size={20} aria-label="Searching" /> : null}
+        {loading && !showingCommittedResults ? (
+          <SpinnerGap className="spin" size={20} aria-label="Searching" />
+        ) : null}
       </label>
 
       {!query.trim() ? (
@@ -761,7 +760,6 @@ export function SearchScreen({
         </div>
       ) : null}
       <RefreshStatus
-        refreshing={loading && showingCommittedResults}
         error={backgroundError ? error : undefined}
         onRetry={() => setRetry((value) => value + 1)}
       />

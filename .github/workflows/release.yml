@@ -60,7 +60,9 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: verify
+    needs:
+      - verify
+      - update-iina-update-branch
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -112,3 +114,15 @@ jobs:
               --title "Jellyfin for IINA ${GITHUB_REF_NAME#v}"
           fi
           gh release edit "$GITHUB_REF_NAME" --draft=false
+
+  update-iina-update-branch:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - name: Update IINA 1.4.4 update-check branch
+        run: git push origin "$(git rev-list -n 1 "$GITHUB_REF_NAME"):refs/heads/master"

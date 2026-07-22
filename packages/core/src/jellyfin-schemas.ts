@@ -78,6 +78,7 @@ export const BaseItemSchema = z
     ParentIndexNumber: z.number().int().nullable().optional(),
     SeriesName: shortText.nullable().optional(),
     SeriesId: identifier.nullable().optional(),
+    SeasonId: identifier.nullable().optional(),
     ParentBackdropItemId: identifier.nullable().optional(),
     OfficialRating: z.string().max(128).nullable().optional(),
     CommunityRating: z.number().finite().nullable().optional(),

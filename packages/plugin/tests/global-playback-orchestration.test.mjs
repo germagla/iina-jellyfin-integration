@@ -6,10 +6,17 @@ import { beforeAll, describe, expect, it } from 'vitest';
 const BRIDGE_REQUEST_MESSAGE = 'bridge.request';
 const BRIDGE_RESPONSE_MESSAGE = 'bridge.response';
 const PLAYER_LAUNCH_MESSAGE = 'jellyfin.player.launch';
+const PLAYER_LINKED_LAUNCH_MESSAGE = 'jellyfin.player.linked-launch';
+const PLAYER_CLOSED_MESSAGE = 'jellyfin.player.closed';
 const PLAYER_STOP_MESSAGE = 'jellyfin.player.stop';
 const PLAYBACK_STATE_MESSAGE = 'playback.state';
 const PLAYBACK_STATE_REMOVED_MESSAGE = 'playback.state.removed';
 const CATALOG_READY_MESSAGE = 'catalog.ready';
+const LINKED_CONNECTION = {
+  serverId: 'server-vm-test',
+  userId: 'user-vm-test',
+  lastConnectedAt: '2026-07-17T00:00:00.000Z',
+};
 
 let globalBundle;
 
@@ -141,6 +148,7 @@ function createHarness({ createPlayerError } = {}) {
     ['artworkCacheMaxBytes', 50 * 1024 * 1024],
   ]);
   const standaloneHandlers = new Map();
+  const globalHandlers = new Map();
   const standaloneMessages = [];
   const nativeCalls = [];
   const requests = [];
@@ -287,6 +295,9 @@ function createHarness({ createPlayerError } = {}) {
           timerDelay: currentTimerDelay,
         });
       },
+      onMessage(name, callback) {
+        globalHandlers.set(name, callback);
+      },
     },
   };
 
@@ -401,6 +412,11 @@ function createHarness({ createPlayerError } = {}) {
     drainMainTimers,
     files,
     flushMicrotasks,
+    emitGlobal(name, payload, playerLabel) {
+      const handler = globalHandlers.get(name);
+      if (handler === undefined) throw new Error(`Global did not register ${name}.`);
+      handler(payload, playerLabel);
+    },
     emitStandalone(name, payload) {
       const handler = standaloneHandlers.get(name);
       if (handler === undefined) throw new Error(`Global did not register ${name}.`);
@@ -432,6 +448,165 @@ function expectAllNativeCallsOnIinaMainLoop(harness) {
 }
 
 describe('bundled Global playback orchestration', () => {
+  it('registers a History-opened player for catalog state and managed reuse', async () => {
+    const harness = createHarness();
+    const playbackId = 'play-history-linked';
+    harness.emitGlobal(
+      PLAYER_LINKED_LAUNCH_MESSAGE,
+      { playbackId, connection: LINKED_CONNECTION },
+      'history-player-label',
+    );
+    harness.files.set(
+      `@tmp/jellyfin-playback-state-${playbackId}.json`,
+      JSON.stringify(publicPlaybackState(playbackId, 'episode-history')),
+    );
+
+    expect(await harness.runNextTimerWithDelay(500)).toBe(true);
+    expect(harness.standaloneMessages).toContainEqual({
+      name: PLAYBACK_STATE_MESSAGE,
+      payload: expect.objectContaining({ playbackId, itemId: 'episode-history' }),
+    });
+
+    await harness.request(playbackRequest('reuse-history-player', 'episode-next'));
+
+    expect(harness.nativeCalls.filter(({ kind }) => kind === 'create')).toHaveLength(0);
+    expect(harness.nativeCalls).toContainEqual(
+      expect.objectContaining({
+        kind: 'post',
+        playerId: 'history-player-label',
+        name: PLAYER_LAUNCH_MESSAGE,
+      }),
+    );
+  });
+
+  it('keeps a managed numeric core when its native playlist selects the next episode', async () => {
+    const harness = createHarness();
+    const first = await harness.request(playbackRequest('playlist-first', 'episode-first'));
+
+    harness.emitGlobal(
+      PLAYER_LINKED_LAUNCH_MESSAGE,
+      {
+        playbackId: 'play-native-next',
+        previousPlaybackId: first.result.playbackId,
+        connection: LINKED_CONNECTION,
+      },
+      'internal-player-label',
+    );
+    await harness.request(playbackRequest('playlist-after-native', 'episode-after-native'));
+
+    expect(harness.nativeCalls.filter(({ kind }) => kind === 'create')).toHaveLength(1);
+    expect(
+      harness.nativeCalls.filter(
+        ({ kind, name }) => kind === 'post' && name === PLAYER_STOP_MESSAGE,
+      ),
+    ).toHaveLength(0);
+    expect(harness.nativeCalls.at(-1)).toMatchObject({
+      kind: 'post',
+      playerId: 41,
+      name: PLAYER_LAUNCH_MESSAGE,
+      payload: { plan: { itemId: 'episode-after-native' } },
+    });
+  });
+
+  it('forgets a closed History player before the next catalog launch', async () => {
+    const harness = createHarness();
+    harness.emitGlobal(
+      PLAYER_LINKED_LAUNCH_MESSAGE,
+      { playbackId: 'play-history-closed', connection: LINKED_CONNECTION },
+      'closed-history-label',
+    );
+    harness.emitGlobal(
+      PLAYER_CLOSED_MESSAGE,
+      { playbackId: 'play-history-closed' },
+      'closed-history-label',
+    );
+
+    await harness.request(playbackRequest('after-history-close', 'episode-fresh-core'));
+
+    expect(harness.nativeCalls.filter(({ kind }) => kind === 'create')).toHaveLength(1);
+    expect(harness.nativeCalls).not.toContainEqual(
+      expect.objectContaining({
+        kind: 'post',
+        playerId: 'closed-history-label',
+        name: PLAYER_LAUNCH_MESSAGE,
+      }),
+    );
+  });
+
+  it('does not later stop a managed core after it releases Jellyfin for local media', async () => {
+    const harness = createHarness();
+    const first = await harness.request(playbackRequest('before-local', 'episode-before-local'));
+    harness.emitGlobal(
+      PLAYER_CLOSED_MESSAGE,
+      { playbackId: first.result.playbackId },
+      'internal-player-label',
+    );
+    await harness.request(playbackRequest('after-local', 'episode-after-local'));
+    await harness.request({
+      operation: 'connection.disconnect',
+      requestId: 'disconnect-after-local',
+      payload: {},
+    });
+
+    const stops = harness.nativeCalls.filter(
+      ({ kind, name }) => kind === 'post' && name === PLAYER_STOP_MESSAGE,
+    );
+    expect(stops.map(({ playerId }) => playerId)).toEqual([42]);
+  });
+
+  it('rejects a linked launch from a stale saved connection', async () => {
+    const harness = createHarness();
+    harness.emitGlobal(
+      PLAYER_LINKED_LAUNCH_MESSAGE,
+      {
+        playbackId: 'play-stale-connection',
+        connection: { ...LINKED_CONNECTION, userId: 'different-user' },
+      },
+      'stale-history-label',
+    );
+    await harness.drainMainTimers();
+    await harness.request(playbackRequest('after-stale-link', 'episode-current-user'));
+
+    expect(harness.nativeCalls).toContainEqual(
+      expect.objectContaining({
+        kind: 'post',
+        playerId: 'stale-history-label',
+        name: PLAYER_STOP_MESSAGE,
+      }),
+    );
+    expect(harness.nativeCalls.filter(({ kind }) => kind === 'create')).toHaveLength(1);
+  });
+
+  it('does not let a detached playlist continuation invalidate a managed launch', async () => {
+    const harness = createHarness();
+    await harness.request(playbackRequest('managed-base', 'episode-managed-base'));
+    const detached = await harness.request(
+      playbackRequest('detached-base', 'episode-detached-base', { openInNewWindow: true }),
+    );
+    const gate = harness.deferDetails('episode-managed-slow');
+    harness.send(playbackRequest('managed-slow', 'episode-managed-slow'));
+    await harness.flushMicrotasks();
+
+    harness.emitGlobal(
+      PLAYER_LINKED_LAUNCH_MESSAGE,
+      {
+        playbackId: 'play-detached-next',
+        previousPlaybackId: detached.result.playbackId,
+        connection: LINKED_CONNECTION,
+      },
+      'detached-player-label',
+    );
+    gate.resolve();
+    const response = await harness.settleBridgeRequest('managed-slow');
+
+    expect(response).toMatchObject({ ok: true, result: { status: 'started' } });
+    expect(harness.nativeCalls.at(-1)).toMatchObject({
+      kind: 'post',
+      playerId: 41,
+      name: PLAYER_LAUNCH_MESSAGE,
+    });
+  });
+
   it('creates and targets the initial managed player only in zero-delay IINA callbacks', async () => {
     const harness = createHarness();
     const request = playbackRequest('initial-managed', 'episode-initial');
@@ -457,6 +632,7 @@ describe('bundled Global playback orchestration', () => {
       name: PLAYER_LAUNCH_MESSAGE,
       timerDelay: 0,
       payload: {
+        serverId: 'server-vm-test',
         plan: {
           itemId: 'episode-initial',
           playMethod: 'DirectPlay',

@@ -3,6 +3,8 @@ import type { AuthenticatedApiContext, BaseItem, PlaybackPlan } from '@iina-jell
 export interface PlayerDisplayMetadata {
   title: string;
   seriesName?: string;
+  seriesId?: string;
+  seasonId?: string;
   seasonNumber?: number;
   episodeNumber?: number;
   overview?: string;
@@ -11,6 +13,12 @@ export interface PlayerDisplayMetadata {
 
 export interface PlayerLaunch {
   nonce: string;
+  serverId: string;
+  connection: {
+    serverId: string;
+    userId: string;
+    lastConnectedAt: string;
+  };
   diagnosticCorrelation?: string;
   plan: PlaybackPlan;
   context: AuthenticatedApiContext;
@@ -20,6 +28,8 @@ export interface PlayerLaunch {
 export function displayMetadataFromItem(item: BaseItem): PlayerDisplayMetadata {
   const display: PlayerDisplayMetadata = { title: item.Name };
   if (item.SeriesName != null) display.seriesName = item.SeriesName;
+  if (item.SeriesId != null) display.seriesId = item.SeriesId;
+  if (item.SeasonId != null) display.seasonId = item.SeasonId;
   if (item.ParentIndexNumber != null) display.seasonNumber = item.ParentIndexNumber;
   if (item.IndexNumber != null) display.episodeNumber = item.IndexNumber;
   if (item.Overview != null) display.overview = item.Overview;
